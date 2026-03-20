@@ -1,8 +1,12 @@
 from datetime import datetime
+import logging
 
 from .fitatu_client import FitatuClient
 from .models import DailyNutrition, MealItem, MealNutrition
 from .schemas import DaySummarySchema, MacroTotals, MealItemSchema, MealSummarySchema
+
+
+logger = logging.getLogger(__name__)
 
 
 def safe_float(value) -> float:
@@ -15,6 +19,7 @@ def safe_float(value) -> float:
 
 
 def aggregate_day_summary(user_id: str, day_date: str, diet_plan: dict) -> DaySummarySchema:
+    logger.info("Aggregating day summary user_id=%s day_date=%s meals=%s", user_id, day_date, len(diet_plan or {}))
     meals: list[MealSummarySchema] = []
     day_totals = MacroTotals()
 
@@ -76,6 +81,7 @@ def aggregate_day_summary(user_id: str, day_date: str, diet_plan: dict) -> DaySu
 
 
 def persist_day_summary(db, summary: DaySummarySchema) -> None:
+    logger.info("Persisting day summary user_id=%s day_date=%s", summary.user_id, summary.day_date)
     summary_date = datetime.strptime(summary.day_date, "%Y-%m-%d").date()
     day_row = (
         db.query(DailyNutrition)
@@ -84,6 +90,7 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
     )
 
     if not day_row:
+        logger.info("No existing day row found; creating new row")
         day_row = DailyNutrition(
             user_id=summary.user_id,
             day_date=summary_date,
@@ -103,6 +110,7 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
     for meal in summary.meals:
         meal_row = existing_meals.get(meal.meal_key)
         if not meal_row:
+            logger.info("Creating new meal row meal_key=%s", meal.meal_key)
             meal_row = MealNutrition(
                 daily_id=day_row.id,
                 meal_key=meal.meal_key,
@@ -168,6 +176,7 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
     day_row.total_salt = sum(meal.total_salt for meal in day_row.meals)
 
     db.commit()
+    logger.info("Persist complete user_id=%s day_date=%s total_meals=%s", summary.user_id, summary.day_date, len(day_row.meals))
 
 
 def _item_key_from_db(item: MealItem) -> tuple:
@@ -208,6 +217,7 @@ def _recalculate_meal_totals(meal_row: MealNutrition) -> None:
 
 
 def sync_day_from_fitatu(db, client: FitatuClient, day_date: str) -> DaySummarySchema:
+    logger.info("Sync start day_date=%s user_id=%s", day_date, client.user_id)
     payload = client.get_day(day_date)
     summary = aggregate_day_summary(client.user_id or "", day_date, payload.get("dietPlan", {}))
     persist_day_summary(db, summary)
@@ -216,7 +226,9 @@ def sync_day_from_fitatu(db, client: FitatuClient, day_date: str) -> DaySummaryS
         .filter(DailyNutrition.user_id == (client.user_id or ""), DailyNutrition.day_date == datetime.strptime(day_date, "%Y-%m-%d").date())
         .one()
     )
-    return db_day_to_schema(persisted_day)
+    result = db_day_to_schema(persisted_day)
+    logger.info("Sync complete day_date=%s user_id=%s meals=%s", day_date, result.user_id, len(result.meals))
+    return result
 
 
 def db_day_to_schema(day_row: DailyNutrition) -> DaySummarySchema:

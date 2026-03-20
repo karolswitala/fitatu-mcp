@@ -89,11 +89,19 @@ async def bearer_auth(request: Request, call_next):
     return await call_next(request)
 
 
-def _load_day(db: Session, day_date: str) -> DailyNutrition | None:
+def _ensure_user_id() -> str:
+    if not client.user_id:
+        client.login()
+    if not client.user_id:
+        raise ValueError("Could not determine user_id after login")
+    return client.user_id
+
+
+def _load_day(db: Session, user_id: str, day_date: str) -> DailyNutrition | None:
     return (
         db.query(DailyNutrition)
         .options(joinedload(DailyNutrition.meals).joinedload(MealNutrition.items))
-        .filter(DailyNutrition.day_date == day_date)
+        .filter(DailyNutrition.user_id == user_id, DailyNutrition.day_date == day_date)
         .one_or_none()
     )
 
@@ -114,6 +122,19 @@ def _cache_counts(db: Session, user_id: str, day_date: str) -> tuple[int, int]:
     return meals_count, items_count
 
 
+def _load_or_sync_day(db: Session, user_id: str, day_date: str) -> DailyNutrition:
+    day_row = _load_day(db, user_id, day_date)
+    if day_row:
+        return day_row
+
+    logger.info("Cache miss for day_date=%s user_id=%s; triggering auto-sync", day_date, user_id)
+    summary = sync_day_from_fitatu(db, client, day_date)
+    day_row = _load_day(db, summary.user_id, day_date)
+    if not day_row:
+        raise ValueError("Day data not found after auto-sync. Check Fitatu source data.")
+    return day_row
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -123,12 +144,9 @@ def health() -> dict[str, str]:
 def mcp_sync_day(day_date: str) -> dict:
     logger.info("Tool sync_day called day_date=%s", day_date)
     with SessionLocal() as db:
-        if not client.user_id:
-            client.login()
-        if not client.user_id:
-            raise ValueError("Could not determine user_id after login")
+        user_id = _ensure_user_id()
 
-        before_meals, before_items = _cache_counts(db, client.user_id, day_date)
+        before_meals, before_items = _cache_counts(db, user_id, day_date)
         summary = sync_day_from_fitatu(db, client, day_date)
         after_meals, after_items = _cache_counts(db, summary.user_id, day_date)
 
@@ -160,9 +178,8 @@ def mcp_sync_day(day_date: str) -> dict:
 def mcp_get_day_summary(day_date: str) -> dict:
     logger.info("Tool get_day_summary called day_date=%s", day_date)
     with SessionLocal() as db:
-        day_row = _load_day(db, day_date)
-        if not day_row:
-            raise ValueError("Day data not found. Call sync_day first.")
+        user_id = _ensure_user_id()
+        day_row = _load_or_sync_day(db, user_id, day_date)
         return db_day_to_schema(day_row).model_dump()
 
 
@@ -170,9 +187,8 @@ def mcp_get_day_summary(day_date: str) -> dict:
 def mcp_get_day_macros(day_date: str) -> dict:
     logger.info("Tool get_day_macros called day_date=%s", day_date)
     with SessionLocal() as db:
-        day_row = db.query(DailyNutrition).filter(DailyNutrition.day_date == day_date).one_or_none()
-        if not day_row:
-            raise ValueError("Day data not found. Call sync_day first.")
+        user_id = _ensure_user_id()
+        day_row = _load_or_sync_day(db, user_id, day_date)
 
         return MacroTotals(
             energy=day_row.total_energy,
@@ -189,9 +205,8 @@ def mcp_get_day_macros(day_date: str) -> dict:
 def mcp_get_day_meals(day_date: str) -> dict:
     logger.info("Tool get_day_meals called day_date=%s", day_date)
     with SessionLocal() as db:
-        day_row = _load_day(db, day_date)
-        if not day_row:
-            raise ValueError("Day data not found. Call sync_day first.")
+        user_id = _ensure_user_id()
+        day_row = _load_or_sync_day(db, user_id, day_date)
 
         summary = db_day_to_schema(day_row)
         return {"day_date": summary.day_date, "user_id": summary.user_id, "meals": [m.model_dump() for m in summary.meals]}
@@ -201,9 +216,8 @@ def mcp_get_day_meals(day_date: str) -> dict:
 def mcp_get_cache_stats(day_date: str) -> dict:
     logger.info("Tool get_cache_stats called day_date=%s", day_date)
     with SessionLocal() as db:
-        day_row = _load_day(db, day_date)
-        if not day_row:
-            raise ValueError("Day data not found in cache. Call sync_day first.")
+        user_id = _ensure_user_id()
+        day_row = _load_or_sync_day(db, user_id, day_date)
 
         return {
             "day_date": day_row.day_date.isoformat(),

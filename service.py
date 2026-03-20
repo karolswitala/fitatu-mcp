@@ -1,5 +1,6 @@
 from datetime import datetime
 import logging
+from sqlalchemy.orm import object_session
 
 from .fitatu_client import FitatuClient
 from .models import DailyNutrition, MealItem, MealNutrition
@@ -134,11 +135,26 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
         meal_row.meal_time = meal.meal_time
         meal_row.recommended_percent = meal.recommended_percent
 
-        existing_item_keys = {_item_key_from_db(existing_item) for existing_item in meal_row.items}
+        existing_items_by_key = {_item_key_from_db(existing_item): existing_item for existing_item in meal_row.items}
 
         for item in meal.items:
             item_key = _item_key_from_schema(item)
-            if item_key in existing_item_keys:
+            existing_item = existing_items_by_key.get(item_key)
+            if existing_item:
+                # Keep cache additive, but refresh nutrient values so stale zero rows are corrected.
+                existing_item.name = item.name
+                existing_item.brand = item.brand
+                existing_item.measure_name = item.measure_name
+                existing_item.measure_quantity = item.measure_quantity
+                existing_item.weight = item.weight
+                existing_item.energy = item.energy
+                existing_item.protein = item.protein
+                existing_item.fat = item.fat
+                existing_item.carbohydrate = item.carbohydrate
+                existing_item.fiber = item.fiber
+                existing_item.sugars = item.sugars
+                existing_item.salt = item.salt
+                existing_item.eaten = item.eaten
                 continue
 
             db_item = MealItem(
@@ -160,20 +176,21 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
                 eaten=item.eaten,
             )
             db.add(db_item)
-            existing_item_keys.add(item_key)
+            existing_items_by_key[item_key] = db_item
 
     db.flush()
 
-    for meal_row in day_row.meals:
+    meal_rows = db.query(MealNutrition).filter(MealNutrition.daily_id == day_row.id).all()
+    for meal_row in meal_rows:
         _recalculate_meal_totals(meal_row)
 
-    day_row.total_energy = sum(meal.total_energy for meal in day_row.meals)
-    day_row.total_protein = sum(meal.total_protein for meal in day_row.meals)
-    day_row.total_fat = sum(meal.total_fat for meal in day_row.meals)
-    day_row.total_carbohydrate = sum(meal.total_carbohydrate for meal in day_row.meals)
-    day_row.total_fiber = sum(meal.total_fiber for meal in day_row.meals)
-    day_row.total_sugars = sum(meal.total_sugars for meal in day_row.meals)
-    day_row.total_salt = sum(meal.total_salt for meal in day_row.meals)
+    day_row.total_energy = sum(meal.total_energy for meal in meal_rows)
+    day_row.total_protein = sum(meal.total_protein for meal in meal_rows)
+    day_row.total_fat = sum(meal.total_fat for meal in meal_rows)
+    day_row.total_carbohydrate = sum(meal.total_carbohydrate for meal in meal_rows)
+    day_row.total_fiber = sum(meal.total_fiber for meal in meal_rows)
+    day_row.total_sugars = sum(meal.total_sugars for meal in meal_rows)
+    day_row.total_salt = sum(meal.total_salt for meal in meal_rows)
 
     db.commit()
     logger.info("Persist complete user_id=%s day_date=%s total_meals=%s", summary.user_id, summary.day_date, len(day_row.meals))
@@ -206,14 +223,20 @@ def _item_key_from_schema(item: MealItemSchema) -> tuple:
 
 
 def _recalculate_meal_totals(meal_row: MealNutrition) -> None:
-    meal_row.item_count = len(meal_row.items)
-    meal_row.total_energy = sum(item.energy for item in meal_row.items)
-    meal_row.total_protein = sum(item.protein for item in meal_row.items)
-    meal_row.total_fat = sum(item.fat for item in meal_row.items)
-    meal_row.total_carbohydrate = sum(item.carbohydrate for item in meal_row.items)
-    meal_row.total_fiber = sum(item.fiber for item in meal_row.items)
-    meal_row.total_sugars = sum(item.sugars for item in meal_row.items)
-    meal_row.total_salt = sum(item.salt for item in meal_row.items)
+    session = object_session(meal_row)
+    if session is None:
+        items = list(meal_row.items)
+    else:
+        items = session.query(MealItem).filter(MealItem.meal_id == meal_row.id).all()
+
+    meal_row.item_count = len(items)
+    meal_row.total_energy = sum(item.energy for item in items)
+    meal_row.total_protein = sum(item.protein for item in items)
+    meal_row.total_fat = sum(item.fat for item in items)
+    meal_row.total_carbohydrate = sum(item.carbohydrate for item in items)
+    meal_row.total_fiber = sum(item.fiber for item in items)
+    meal_row.total_sugars = sum(item.sugars for item in items)
+    meal_row.total_salt = sum(item.salt for item in items)
 
 
 def sync_day_from_fitatu(db, client: FitatuClient, day_date: str) -> DaySummarySchema:

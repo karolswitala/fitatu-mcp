@@ -107,6 +107,13 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
         db.flush()
 
     existing_meals = {meal.meal_key: meal for meal in day_row.meals}
+    summary_meal_keys = {meal.meal_key for meal in summary.meals}
+
+    for meal_key, existing_meal in list(existing_meals.items()):
+        if meal_key not in summary_meal_keys:
+            logger.info("Deleting removed meal row meal_key=%s", meal_key)
+            db.delete(existing_meal)
+            existing_meals.pop(meal_key, None)
 
     for meal in summary.meals:
         meal_row = existing_meals.get(meal.meal_key)
@@ -136,6 +143,13 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
         meal_row.recommended_percent = meal.recommended_percent
 
         existing_items_by_key = {_item_key_from_db(existing_item): existing_item for existing_item in meal_row.items}
+        summary_item_keys = {_item_key_from_schema(item) for item in meal.items}
+
+        for item_key, existing_item in list(existing_items_by_key.items()):
+            if item_key not in summary_item_keys:
+                logger.info("Deleting removed meal item meal_key=%s item_key=%s", meal.meal_key, item_key)
+                db.delete(existing_item)
+                existing_items_by_key.pop(item_key, None)
 
         for item in meal.items:
             item_key = _item_key_from_schema(item)

@@ -29,10 +29,11 @@ Set credentials:
 
 - `FITATU_USERNAME`
 - `FITATU_PASSWORD`
-- `FITATU_API_SECRET`
+- `FITATU_API_SECRET` — can be obtained by inspecting network requests in the Fitatu web app (e.g. via browser DevTools); look for the `api-secret` (or similar) header in authenticated API calls
 
 Then run:
 
+**PowerShell:**
 ```powershell
 pip install -r mcp_server/requirements.txt
 $env:FITATU_USERNAME="your_email"
@@ -41,23 +42,32 @@ $env:FITATU_API_SECRET="your_api_secret"
 python -m uvicorn mcp_server.server:app --host 0.0.0.0 --port 8000
 ```
 
+**bash/zsh:**
+```bash
+pip install -r mcp_server/requirements.txt
+export FITATU_USERNAME="your_email"
+export FITATU_PASSWORD="your_password"
+export FITATU_API_SECRET="your_api_secret"
+python -m uvicorn mcp_server.server:app --host 0.0.0.0 --port 8000
+```
+
 ## Docker
 
 Build image:
 
-```powershell
+```bash
 docker build -t fitatu-mcp-server ./mcp_server
 ```
 
 Run container (username/password passed at runtime):
 
-```powershell
-docker run --rm -p 8000:8000 ^
-  -e FITATU_USERNAME="your_email" ^
-  -e FITATU_PASSWORD="your_password" ^
-  -e FITATU_API_SECRET="your_api_secret" ^
-  -e FITATU_DB_FILE="/data/fitatu_nutrition.db" ^
-  -v ${PWD}/data:/data ^
+```bash
+docker run --rm -p 8000:8000 \
+  -e FITATU_USERNAME="your_email" \
+  -e FITATU_PASSWORD="your_password" \
+  -e FITATU_API_SECRET="your_api_secret" \
+  -e FITATU_DB_FILE="/data/fitatu_nutrition.db" \
+  -v "${PWD}/data:/data" \
   fitatu-mcp-server
 ```
 

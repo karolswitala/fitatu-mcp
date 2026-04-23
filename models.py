@@ -64,6 +64,9 @@ class MealNutrition(Base):
 
 class MealItem(Base):
     __tablename__ = "meal_item"
+    __table_args__ = (
+        UniqueConstraint("meal_id", "plan_day_diet_item_id", name="uq_meal_item_plan_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     meal_id: Mapped[int] = mapped_column(ForeignKey("meal_nutrition.id", ondelete="CASCADE"), index=True)

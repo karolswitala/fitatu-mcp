@@ -1,6 +1,6 @@
 from datetime import datetime
 import logging
-from sqlalchemy.orm import object_session
+from sqlalchemy.orm import joinedload, object_session
 
 from .fitatu_client import FitatuClient
 from .models import DailyNutrition, MealItem, MealNutrition
@@ -86,6 +86,7 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
     summary_date = datetime.strptime(summary.day_date, "%Y-%m-%d").date()
     day_row = (
         db.query(DailyNutrition)
+        .options(joinedload(DailyNutrition.meals).joinedload(MealNutrition.items))
         .filter(DailyNutrition.user_id == summary.user_id, DailyNutrition.day_date == summary_date)
         .one_or_none()
     )

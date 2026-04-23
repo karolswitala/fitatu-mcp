@@ -2,7 +2,7 @@ import os
 import logging
 import re
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -157,7 +157,7 @@ def _is_today_stale(day_row: DailyNutrition, day_date: str) -> bool:
         return False
     if day_row.updated_at is None:
         return True
-    age_seconds = (datetime.utcnow() - day_row.updated_at).total_seconds()
+    age_seconds = (datetime.now(timezone.utc) - day_row.updated_at.replace(tzinfo=timezone.utc)).total_seconds()
     return age_seconds > TODAY_TTL_SECONDS
 
 

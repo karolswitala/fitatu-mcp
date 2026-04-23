@@ -2,6 +2,7 @@ import os
 import logging
 import re
 from contextlib import asynccontextmanager
+from datetime import date, datetime
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -39,6 +40,8 @@ if not FITATU_USERNAME or not FITATU_PASSWORD:
     raise RuntimeError("FITATU_USERNAME and FITATU_PASSWORD must be set")
 if not MCP_API_KEY:
     raise RuntimeError("MCP_API_KEY must be set")
+
+TODAY_TTL_SECONDS = int(os.getenv("FITATU_TODAY_TTL_SECONDS", "300"))
 
 client = FitatuClient(FITATU_USERNAME, FITATU_PASSWORD)
 
@@ -133,15 +136,29 @@ def _cache_counts(db: Session, user_id: str, day_date: str) -> tuple[int, int]:
 
 def _load_or_sync_day(db: Session, user_id: str, day_date: str) -> DailyNutrition:
     day_row = _load_day(db, user_id, day_date)
-    if day_row:
+
+    if day_row and not _is_today_stale(day_row, day_date):
         return day_row
 
-    logger.info("Cache miss for day_date=%s user_id=%s; triggering auto-sync", day_date, user_id)
+    if day_row:
+        logger.info("Stale today cache for day_date=%s user_id=%s; triggering re-sync", day_date, user_id)
+    else:
+        logger.info("Cache miss for day_date=%s user_id=%s; triggering auto-sync", day_date, user_id)
+
     summary = sync_day_from_fitatu(db, client, day_date)
     day_row = _load_day(db, summary.user_id, day_date)
     if not day_row:
         raise ValueError("Day data not found after auto-sync. Check Fitatu source data.")
     return day_row
+
+
+def _is_today_stale(day_row: DailyNutrition, day_date: str) -> bool:
+    if day_date != date.today().isoformat():
+        return False
+    if day_row.updated_at is None:
+        return True
+    age_seconds = (datetime.utcnow() - day_row.updated_at).total_seconds()
+    return age_seconds > TODAY_TTL_SECONDS
 
 
 @app.get("/health")

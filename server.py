@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -89,6 +90,14 @@ async def bearer_auth(request: Request, call_next):
     return await call_next(request)
 
 
+_DATE_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
+
+
+def _validate_day_date(day_date: str) -> None:
+    if not _DATE_RE.match(day_date):
+        raise ValueError(f"Invalid day_date '{day_date}': must be YYYY-MM-DD (e.g. 2024-01-31)")
+
+
 def _ensure_user_id() -> str:
     if not client.user_id:
         client.login()
@@ -143,6 +152,7 @@ def health() -> dict[str, str]:
 @mcp.tool(name="sync_day", description="Sync daily nutrition from Fitatu into SQLite for a given YYYY-MM-DD date")
 def mcp_sync_day(day_date: str) -> dict:
     logger.info("Tool sync_day called day_date=%s", day_date)
+    _validate_day_date(day_date)
     with SessionLocal() as db:
         user_id = _ensure_user_id()
 
@@ -177,6 +187,7 @@ def mcp_sync_day(day_date: str) -> dict:
 @mcp.tool(name="get_day_summary", description="Get full daily nutrition summary including meals and items")
 def mcp_get_day_summary(day_date: str) -> dict:
     logger.info("Tool get_day_summary called day_date=%s", day_date)
+    _validate_day_date(day_date)
     with SessionLocal() as db:
         user_id = _ensure_user_id()
         day_row = _load_or_sync_day(db, user_id, day_date)
@@ -186,6 +197,7 @@ def mcp_get_day_summary(day_date: str) -> dict:
 @mcp.tool(name="get_day_macros", description="Get macro totals for a day")
 def mcp_get_day_macros(day_date: str) -> dict:
     logger.info("Tool get_day_macros called day_date=%s", day_date)
+    _validate_day_date(day_date)
     with SessionLocal() as db:
         user_id = _ensure_user_id()
         day_row = _load_or_sync_day(db, user_id, day_date)
@@ -204,6 +216,7 @@ def mcp_get_day_macros(day_date: str) -> dict:
 @mcp.tool(name="get_day_meals", description="Get meal summaries and meal items for a day")
 def mcp_get_day_meals(day_date: str) -> dict:
     logger.info("Tool get_day_meals called day_date=%s", day_date)
+    _validate_day_date(day_date)
     with SessionLocal() as db:
         user_id = _ensure_user_id()
         day_row = _load_or_sync_day(db, user_id, day_date)
@@ -215,6 +228,7 @@ def mcp_get_day_meals(day_date: str) -> dict:
 @mcp.tool(name="get_cache_stats", description="Get cached meal/item counts and macro totals for a day")
 def mcp_get_cache_stats(day_date: str) -> dict:
     logger.info("Tool get_cache_stats called day_date=%s", day_date)
+    _validate_day_date(day_date)
     with SessionLocal() as db:
         user_id = _ensure_user_id()
         day_row = _load_or_sync_day(db, user_id, day_date)

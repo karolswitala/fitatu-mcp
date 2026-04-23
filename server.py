@@ -95,10 +95,48 @@ async def bearer_auth(request: Request, call_next):
 
 _DATE_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
 
+MAX_RANGE_DAYS_COMPACT = 31   # sync_day, get_day_macros, get_cache_stats
+MAX_RANGE_DAYS_VERBOSE = 7    # get_day_summary, get_day_meals
+
+
+def _parse_date(day_date: str) -> date:
+    if not _DATE_RE.match(day_date):
+        raise ValueError(f"Invalid date '{day_date}': must be YYYY-MM-DD (e.g. 2024-01-31)")
+    try:
+        return datetime.strptime(day_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError(f"Invalid date '{day_date}': date does not exist in the calendar")
+
 
 def _validate_day_date(day_date: str) -> None:
-    if not _DATE_RE.match(day_date):
-        raise ValueError(f"Invalid day_date '{day_date}': must be YYYY-MM-DD (e.g. 2024-01-31)")
+    _parse_date(day_date)
+
+
+def _validate_date_range(start_date: str, end_date: str, max_days: int) -> tuple[date, date]:
+    start = _parse_date(start_date)
+    end = _parse_date(end_date)
+    if end < start:
+        raise ValueError(f"end_date '{end_date}' must not be before start_date '{start_date}'")
+    span = (end - start).days + 1
+    if span > max_days:
+        raise ValueError(f"Date range spans {span} days; maximum allowed is {max_days}")
+    return start, end
+
+
+def _iter_date_range(start: date, end: date):
+    current = start
+    while current <= end:
+        yield current.isoformat()
+        current = date.fromordinal(current.toordinal() + 1)
+
+
+def _range_envelope(start_date: str, end_date: str, days: list) -> dict:
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "day_count": len(days),
+        "days": days,
+    }
 
 
 def _ensure_user_id() -> str:
@@ -166,116 +204,174 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@mcp.tool(name="sync_day", description="Sync daily nutrition from Fitatu into SQLite for a given YYYY-MM-DD date")
-def mcp_sync_day(day_date: str) -> dict:
-    logger.info("Tool sync_day called day_date=%s", day_date)
-    _validate_day_date(day_date)
+@mcp.tool(
+    name="sync_day",
+    description=(
+        "Sync daily nutrition from Fitatu into SQLite for a date range. "
+        "start_date is required (YYYY-MM-DD). end_date defaults to start_date. "
+        "Maximum range: 31 days."
+    ),
+)
+def mcp_sync_day(start_date: str, end_date: str = "") -> dict:
+    end_date = end_date or start_date
+    logger.info("Tool sync_day called start_date=%s end_date=%s", start_date, end_date)
+    start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_COMPACT)
+    days = []
     with SessionLocal() as db:
         user_id = _ensure_user_id()
-
-        before_meals, before_items = _cache_counts(db, user_id, day_date)
-        summary = sync_day_from_fitatu(db, client, day_date)
-        after_meals, after_items = _cache_counts(db, summary.user_id, day_date)
-
-        result = {
-            "status": "synced",
-            "user_id": summary.user_id,
-            "day_date": summary.day_date,
-            "totals": summary.totals.model_dump(),
-            "cache_delta": {
-                "meals_added": max(after_meals - before_meals, 0),
-                "items_added": max(after_items - before_items, 0),
-            },
-            "cache_totals": {
-                "meals": after_meals,
-                "items": after_items,
-            },
-        }
-        logger.info(
-            "Tool sync_day completed day_date=%s user_id=%s meals_added=%s items_added=%s",
-            summary.day_date,
-            summary.user_id,
-            result["cache_delta"]["meals_added"],
-            result["cache_delta"]["items_added"],
-        )
-        return result
+        for day_date in _iter_date_range(start, end):
+            before_meals, before_items = _cache_counts(db, user_id, day_date)
+            summary = sync_day_from_fitatu(db, client, day_date)
+            after_meals, after_items = _cache_counts(db, summary.user_id, day_date)
+            days.append({
+                "status": "synced",
+                "user_id": summary.user_id,
+                "day_date": summary.day_date,
+                "totals": summary.totals.model_dump(),
+                "cache": {
+                    "meals_before": before_meals,
+                    "meals_after": after_meals,
+                    "items_before": before_items,
+                    "items_after": after_items,
+                },
+            })
+            logger.info("sync_day synced day_date=%s meals=%s items=%s", day_date, after_meals, after_items)
+    return _range_envelope(start_date, end_date, days)
 
 
-@mcp.tool(name="get_day_summary", description="Get full daily nutrition summary including meals and items")
-def mcp_get_day_summary(day_date: str) -> dict:
-    logger.info("Tool get_day_summary called day_date=%s", day_date)
-    _validate_day_date(day_date)
+@mcp.tool(
+    name="get_day_summary",
+    description=(
+        "Get full daily nutrition summary including meals and items for a date range. "
+        "start_date is required (YYYY-MM-DD). end_date defaults to start_date. "
+        "Maximum range: 7 days."
+    ),
+)
+def mcp_get_day_summary(start_date: str, end_date: str = "") -> dict:
+    end_date = end_date or start_date
+    logger.info("Tool get_day_summary called start_date=%s end_date=%s", start_date, end_date)
+    start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_VERBOSE)
+    days = []
     with SessionLocal() as db:
         user_id = _ensure_user_id()
-        day_row = _load_or_sync_day(db, user_id, day_date)
-        return db_day_to_schema(day_row).model_dump()
+        for day_date in _iter_date_range(start, end):
+            try:
+                day_row = _load_or_sync_day(db, user_id, day_date)
+                days.append(db_day_to_schema(day_row).model_dump())
+            except Exception as exc:
+                logger.warning("get_day_summary failed for day_date=%s: %s", day_date, exc)
+                days.append({"day_date": day_date, "error": str(exc)})
+    return _range_envelope(start_date, end_date, days)
 
 
-@mcp.tool(name="get_day_macros", description="Get macro totals for a day")
-def mcp_get_day_macros(day_date: str) -> dict:
-    logger.info("Tool get_day_macros called day_date=%s", day_date)
-    _validate_day_date(day_date)
+@mcp.tool(
+    name="get_day_macros",
+    description=(
+        "Get macro totals for a date range. "
+        "start_date is required (YYYY-MM-DD). end_date defaults to start_date. "
+        "Maximum range: 31 days."
+    ),
+)
+def mcp_get_day_macros(start_date: str, end_date: str = "") -> dict:
+    end_date = end_date or start_date
+    logger.info("Tool get_day_macros called start_date=%s end_date=%s", start_date, end_date)
+    start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_COMPACT)
+    days = []
     with SessionLocal() as db:
         user_id = _ensure_user_id()
-        day_row = _load_or_sync_day(db, user_id, day_date)
+        for day_date in _iter_date_range(start, end):
+            try:
+                day_row = _load_or_sync_day(db, user_id, day_date)
+                macros = MacroTotals(
+                    energy=day_row.total_energy,
+                    protein=day_row.total_protein,
+                    fat=day_row.total_fat,
+                    carbohydrate=day_row.total_carbohydrate,
+                    fiber=day_row.total_fiber,
+                    sugars=day_row.total_sugars,
+                    salt=day_row.total_salt,
+                ).model_dump()
+                days.append({"day_date": day_date, **macros})
+            except Exception as exc:
+                logger.warning("get_day_macros failed for day_date=%s: %s", day_date, exc)
+                days.append({"day_date": day_date, "error": str(exc)})
+    return _range_envelope(start_date, end_date, days)
 
-        return MacroTotals(
-            energy=day_row.total_energy,
-            protein=day_row.total_protein,
-            fat=day_row.total_fat,
-            carbohydrate=day_row.total_carbohydrate,
-            fiber=day_row.total_fiber,
-            sugars=day_row.total_sugars,
-            salt=day_row.total_salt,
-        ).model_dump()
 
-
-@mcp.tool(name="get_day_meals", description="Get meal summaries and meal items for a day")
-def mcp_get_day_meals(day_date: str) -> dict:
-    logger.info("Tool get_day_meals called day_date=%s", day_date)
-    _validate_day_date(day_date)
+@mcp.tool(
+    name="get_day_meals",
+    description=(
+        "Get meal summaries and meal items for a date range. "
+        "start_date is required (YYYY-MM-DD). end_date defaults to start_date. "
+        "Maximum range: 7 days."
+    ),
+)
+def mcp_get_day_meals(start_date: str, end_date: str = "") -> dict:
+    end_date = end_date or start_date
+    logger.info("Tool get_day_meals called start_date=%s end_date=%s", start_date, end_date)
+    start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_VERBOSE)
+    days = []
     with SessionLocal() as db:
         user_id = _ensure_user_id()
-        day_row = _load_or_sync_day(db, user_id, day_date)
+        for day_date in _iter_date_range(start, end):
+            try:
+                day_row = _load_or_sync_day(db, user_id, day_date)
+                summary = db_day_to_schema(day_row)
+                days.append({
+                    "day_date": summary.day_date,
+                    "user_id": summary.user_id,
+                    "meals": [m.model_dump() for m in summary.meals],
+                })
+            except Exception as exc:
+                logger.warning("get_day_meals failed for day_date=%s: %s", day_date, exc)
+                days.append({"day_date": day_date, "error": str(exc)})
+    return _range_envelope(start_date, end_date, days)
 
-        summary = db_day_to_schema(day_row)
-        return {"day_date": summary.day_date, "user_id": summary.user_id, "meals": [m.model_dump() for m in summary.meals]}
 
-
-@mcp.tool(name="get_cache_stats", description="Get cached meal/item counts and macro totals for a day")
-def mcp_get_cache_stats(day_date: str) -> dict:
-    logger.info("Tool get_cache_stats called day_date=%s", day_date)
-    _validate_day_date(day_date)
+@mcp.tool(
+    name="get_cache_stats",
+    description=(
+        "Get cached meal/item counts and macro totals for a date range. "
+        "start_date is required (YYYY-MM-DD). end_date defaults to start_date. "
+        "Maximum range: 31 days."
+    ),
+)
+def mcp_get_cache_stats(start_date: str, end_date: str = "") -> dict:
+    end_date = end_date or start_date
+    logger.info("Tool get_cache_stats called start_date=%s end_date=%s", start_date, end_date)
+    start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_COMPACT)
+    days = []
     with SessionLocal() as db:
         user_id = _ensure_user_id()
-        day_row = _load_or_sync_day(db, user_id, day_date)
-
-        return {
-            "day_date": day_row.day_date.isoformat(),
-            "user_id": day_row.user_id,
-            "updated_at": day_row.updated_at.isoformat() if day_row.updated_at else None,
-            "totals": {
-                "energy": day_row.total_energy,
-                "protein": day_row.total_protein,
-                "fat": day_row.total_fat,
-                "carbohydrate": day_row.total_carbohydrate,
-                "fiber": day_row.total_fiber,
-                "sugars": day_row.total_sugars,
-                "salt": day_row.total_salt,
-            },
-            "cache": {
-                "meals": len(day_row.meals),
-                "items": sum(len(meal.items) for meal in day_row.meals),
-                "per_meal": [
-                    {
-                        "meal_key": meal.meal_key,
-                        "meal_name": meal.meal_name,
-                        "items": len(meal.items),
-                    }
-                    for meal in day_row.meals
-                ],
-            },
-        }
+        for day_date in _iter_date_range(start, end):
+            try:
+                day_row = _load_or_sync_day(db, user_id, day_date)
+                days.append({
+                    "day_date": day_row.day_date.isoformat(),
+                    "user_id": day_row.user_id,
+                    "updated_at": day_row.updated_at.isoformat() if day_row.updated_at else None,
+                    "totals": {
+                        "energy": day_row.total_energy,
+                        "protein": day_row.total_protein,
+                        "fat": day_row.total_fat,
+                        "carbohydrate": day_row.total_carbohydrate,
+                        "fiber": day_row.total_fiber,
+                        "sugars": day_row.total_sugars,
+                        "salt": day_row.total_salt,
+                    },
+                    "cache": {
+                        "meals": len(day_row.meals),
+                        "items": sum(len(meal.items) for meal in day_row.meals),
+                        "per_meal": [
+                            {"meal_key": meal.meal_key, "meal_name": meal.meal_name, "items": len(meal.items)}
+                            for meal in day_row.meals
+                        ],
+                    },
+                })
+            except Exception as exc:
+                logger.warning("get_cache_stats failed for day_date=%s: %s", day_date, exc)
+                days.append({"day_date": day_date, "error": str(exc)})
+    return _range_envelope(start_date, end_date, days)
 
 
 app.mount("/mcp", mcp_app)

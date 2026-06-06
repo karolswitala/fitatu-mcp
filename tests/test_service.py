@@ -3,7 +3,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fitatu_mcp.service import _item_key, sync_day_from_fitatu
+from fitatu_mcp.models import DailyNutrition
+from fitatu_mcp.schemas import DaySummarySchema, MacroTotals, MealSummarySchema
+from fitatu_mcp.service import _item_key, persist_day_summary, sync_day_from_fitatu
 
 
 def _item(plan_id=None, name="Apple", product_id=1, measure_quantity=100.0, weight=100.0, energy=52.0):
@@ -41,6 +43,51 @@ class TestItemKey:
         db_item = _item(plan_id=None, name="Rice", product_id=42, measure_quantity=150.0, weight=150.0, energy=195.0)
         schema_item = _item(plan_id=None, name="Rice", product_id=42, measure_quantity=150.0, weight=150.0, energy=195.0)
         assert _item_key(db_item) == _item_key(schema_item)
+
+
+class TestPersistDaySummary:
+    def test_returns_daily_nutrition_instance(self, db_session):
+        summary = DaySummarySchema(
+            user_id="user1",
+            day_date="2026-06-06",
+            totals=MacroTotals(energy=500.0, protein=30.0),
+            meals=[
+                MealSummarySchema(
+                    meal_key="breakfast",
+                    meal_name="Breakfast",
+                    item_count=0,
+                    totals=MacroTotals(energy=500.0, protein=30.0),
+                    items=[],
+                )
+            ],
+        )
+        result = persist_day_summary(db_session, summary)
+        assert isinstance(result, DailyNutrition)
+
+    def test_returned_row_matches_summary(self, db_session):
+        summary = DaySummarySchema(
+            user_id="user1",
+            day_date="2026-06-06",
+            totals=MacroTotals(energy=500.0),
+            meals=[],
+        )
+        result = persist_day_summary(db_session, summary)
+        assert result.user_id == "user1"
+        assert result.day_date.isoformat() == "2026-06-06"
+
+    def test_second_call_updates_existing_row(self, db_session):
+        summary = DaySummarySchema(
+            user_id="user1", day_date="2026-06-06",
+            totals=MacroTotals(energy=200.0), meals=[],
+        )
+        persist_day_summary(db_session, summary)
+
+        summary2 = DaySummarySchema(
+            user_id="user1", day_date="2026-06-06",
+            totals=MacroTotals(energy=400.0), meals=[],
+        )
+        result = persist_day_summary(db_session, summary2)
+        assert result.total_energy == 0.0  # no meals → totals stay zero
 
 
 class TestSyncDayFromFitatu:

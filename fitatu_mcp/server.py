@@ -8,10 +8,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 from .database import SessionLocal, init_db
 from .fitatu_client import FitatuClient
-from .models import DailyNutrition, MealNutrition
+from .models import DailyNutrition, MealItem, MealNutrition
 from .schemas import MacroTotals
 from .service import db_day_to_schema, sync_day_from_fitatu
 
@@ -153,18 +154,24 @@ def _load_day(db: Session, user_id: str, day_date: str) -> DailyNutrition | None
 
 
 def _cache_counts(db: Session, user_id: str, day_date: str) -> tuple[int, int]:
-    day_row = (
-        db.query(DailyNutrition)
-        .options(joinedload(DailyNutrition.meals).joinedload(MealNutrition.items))
+    daily_id = (
+        db.query(DailyNutrition.id)
         .filter(DailyNutrition.user_id == user_id, DailyNutrition.day_date == day_date)
-        .one_or_none()
+        .scalar()
     )
-
-    if not day_row:
+    if daily_id is None:
         return 0, 0
-
-    meals_count = len(day_row.meals)
-    items_count = sum(len(meal.items) for meal in day_row.meals)
+    meals_count = (
+        db.query(func.count(MealNutrition.id))
+        .filter(MealNutrition.daily_id == daily_id)
+        .scalar() or 0
+    )
+    items_count = (
+        db.query(func.count(MealItem.id))
+        .join(MealNutrition, MealItem.meal_id == MealNutrition.id)
+        .filter(MealNutrition.daily_id == daily_id)
+        .scalar() or 0
+    )
     return meals_count, items_count
 
 

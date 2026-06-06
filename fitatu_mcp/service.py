@@ -81,7 +81,7 @@ def aggregate_day_summary(user_id: str, day_date: str, diet_plan: dict) -> DaySu
     return DaySummarySchema(user_id=user_id, day_date=day_date, totals=day_totals, meals=meals)
 
 
-def persist_day_summary(db, summary: DaySummarySchema) -> None:
+def persist_day_summary(db, summary: DaySummarySchema) -> DailyNutrition:
     logger.info("Persisting day summary user_id=%s day_date=%s", summary.user_id, summary.day_date)
     summary_date = datetime.strptime(summary.day_date, "%Y-%m-%d").date()
     day_row = (
@@ -209,6 +209,7 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
 
     db.commit()
     logger.info("Persist complete user_id=%s day_date=%s total_meals=%s", summary.user_id, summary.day_date, len(day_row.meals))
+    return day_row
 
 
 def _item_key(item) -> tuple:
@@ -247,13 +248,8 @@ def sync_day_from_fitatu(db, client: FitatuClient, day_date: str) -> DaySummaryS
     if not client.user_id:
         raise ValueError(f"client has no user_id after get_day for day_date={day_date}")
     summary = aggregate_day_summary(client.user_id, day_date, payload.get("dietPlan", {}))
-    persist_day_summary(db, summary)
-    persisted_day = (
-        db.query(DailyNutrition)
-        .filter(DailyNutrition.user_id == client.user_id, DailyNutrition.day_date == datetime.strptime(day_date, "%Y-%m-%d").date())
-        .one()
-    )
-    result = db_day_to_schema(persisted_day)
+    day_row = persist_day_summary(db, summary)
+    result = db_day_to_schema(day_row)
     logger.info("Sync complete day_date=%s user_id=%s meals=%s", day_date, result.user_id, len(result.meals))
     return result
 

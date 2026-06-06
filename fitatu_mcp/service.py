@@ -143,8 +143,8 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
         meal_row.meal_time = meal.meal_time
         meal_row.recommended_percent = meal.recommended_percent
 
-        existing_items_by_key = {_item_key_from_db(existing_item): existing_item for existing_item in meal_row.items}
-        summary_item_keys = {_item_key_from_schema(item) for item in meal.items}
+        existing_items_by_key = {_item_key(existing_item): existing_item for existing_item in meal_row.items}
+        summary_item_keys = {_item_key(item) for item in meal.items}
 
         for item_key, existing_item in list(existing_items_by_key.items()):
             if item_key not in summary_item_keys:
@@ -153,7 +153,7 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
                 existing_items_by_key.pop(item_key, None)
 
         for item in meal.items:
-            item_key = _item_key_from_schema(item)
+            item_key = _item_key(item)
             existing_item = existing_items_by_key.get(item_key)
             if existing_item:
                 # Keep cache additive, but refresh nutrient values so stale zero rows are corrected.
@@ -211,20 +211,7 @@ def persist_day_summary(db, summary: DaySummarySchema) -> None:
     logger.info("Persist complete user_id=%s day_date=%s total_meals=%s", summary.user_id, summary.day_date, len(day_row.meals))
 
 
-def _item_key_from_db(item: MealItem) -> tuple:
-    if item.plan_day_diet_item_id:
-        return ("plan", item.plan_day_diet_item_id)
-    return (
-        "fallback",
-        item.name,
-        item.product_id,
-        round(item.measure_quantity, 6),
-        round(item.weight, 6),
-        round(item.energy, 6),
-    )
-
-
-def _item_key_from_schema(item: MealItemSchema) -> tuple:
+def _item_key(item) -> tuple:
     if item.plan_day_diet_item_id:
         return ("plan", item.plan_day_diet_item_id)
     return (
@@ -257,11 +244,13 @@ def _recalculate_meal_totals(meal_row: MealNutrition) -> None:
 def sync_day_from_fitatu(db, client: FitatuClient, day_date: str) -> DaySummarySchema:
     logger.info("Sync start day_date=%s user_id=%s", day_date, client.user_id)
     payload = client.get_day(day_date)
-    summary = aggregate_day_summary(client.user_id or "", day_date, payload.get("dietPlan", {}))
+    if not client.user_id:
+        raise ValueError(f"client has no user_id after get_day for day_date={day_date}")
+    summary = aggregate_day_summary(client.user_id, day_date, payload.get("dietPlan", {}))
     persist_day_summary(db, summary)
     persisted_day = (
         db.query(DailyNutrition)
-        .filter(DailyNutrition.user_id == (client.user_id or ""), DailyNutrition.day_date == datetime.strptime(day_date, "%Y-%m-%d").date())
+        .filter(DailyNutrition.user_id == client.user_id, DailyNutrition.day_date == datetime.strptime(day_date, "%Y-%m-%d").date())
         .one()
     )
     result = db_day_to_schema(persisted_day)

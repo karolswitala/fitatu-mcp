@@ -39,7 +39,7 @@ pip install -r mcp_server/requirements.txt
 $env:FITATU_USERNAME="your_email"
 $env:FITATU_PASSWORD="your_password"
 $env:FITATU_API_SECRET="your_api_secret"
-python -m uvicorn mcp_server.server:app --host 0.0.0.0 --port 8000
+python -m uvicorn fitatu_mcp.server:app --host 0.0.0.0 --port 8000
 ```
 
 **bash/zsh:**
@@ -48,7 +48,7 @@ pip install -r mcp_server/requirements.txt
 export FITATU_USERNAME="your_email"
 export FITATU_PASSWORD="your_password"
 export FITATU_API_SECRET="your_api_secret"
-python -m uvicorn mcp_server.server:app --host 0.0.0.0 --port 8000
+python -m uvicorn fitatu_mcp.server:app --host 0.0.0.0 --port 8000
 ```
 
 ## Docker

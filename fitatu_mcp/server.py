@@ -108,10 +108,6 @@ def _parse_date(day_date: str) -> date:
         raise ValueError(f"Invalid date '{day_date}': date does not exist in the calendar")
 
 
-def _validate_day_date(day_date: str) -> None:
-    _parse_date(day_date)
-
-
 def _validate_date_range(start_date: str, end_date: str, max_days: int) -> tuple[date, date]:
     start = _parse_date(start_date)
     end = _parse_date(end_date)
@@ -253,7 +249,8 @@ def mcp_sync_day(start_date: str, end_date: str = "") -> dict:
     description=(
         "Get full daily nutrition summary including meals and items for a date range. "
         "start_date is required (YYYY-MM-DD). end_date defaults to start_date. "
-        "Maximum range: 7 days."
+        "Maximum range: 7 days. "
+        "Auto-syncs from Fitatu if the day is not cached or is stale."
     ),
 )
 def mcp_get_day_summary(start_date: str, end_date: str = "") -> dict:
@@ -278,7 +275,8 @@ def mcp_get_day_summary(start_date: str, end_date: str = "") -> dict:
     description=(
         "Get macro totals for a date range. "
         "start_date is required (YYYY-MM-DD). end_date defaults to start_date. "
-        "Maximum range: 31 days."
+        "Maximum range: 31 days. "
+        "Auto-syncs from Fitatu if the day is not cached or is stale."
     ),
 )
 def mcp_get_day_macros(start_date: str, end_date: str = "") -> dict:
@@ -312,7 +310,8 @@ def mcp_get_day_macros(start_date: str, end_date: str = "") -> dict:
     description=(
         "Get meal summaries and meal items for a date range. "
         "start_date is required (YYYY-MM-DD). end_date defaults to start_date. "
-        "Maximum range: 7 days."
+        "Maximum range: 7 days. "
+        "Auto-syncs from Fitatu if the day is not cached or is stale."
     ),
 )
 def mcp_get_day_meals(start_date: str, end_date: str = "") -> dict:
@@ -342,7 +341,8 @@ def mcp_get_day_meals(start_date: str, end_date: str = "") -> dict:
     description=(
         "Get cached meal/item counts and macro totals for a date range. "
         "start_date is required (YYYY-MM-DD). end_date defaults to start_date. "
-        "Maximum range: 31 days."
+        "Maximum range: 31 days. "
+        "Auto-syncs from Fitatu if the day is not cached or is stale."
     ),
 )
 def mcp_get_cache_stats(start_date: str, end_date: str = "") -> dict:

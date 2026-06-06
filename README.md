@@ -11,17 +11,16 @@ Sync is additive: only new meal items are inserted; existing cached items are pr
 
 ## MCP tools (HTTP Streamable)
 
-- `sync_day(day_date)`
-- `get_day_summary(day_date)`
-- `get_day_macros(day_date)`
-- `get_day_meals(day_date)`
-- `get_cache_stats(day_date)`
+All tools accept `start_date` (required, YYYY-MM-DD) and `end_date` (optional, defaults to `start_date`).
+Tools other than `sync_day` auto-sync from Fitatu if the requested day is not cached or is stale.
 
-`sync_day` also returns:
-- `cache_delta`: newly added meals/items in this sync run
-- `cache_totals`: total cached meals/items for that day
-
-Parameter format: `day_date = "YYYY-MM-DD"`
+| Tool | Max range | Description |
+|------|-----------|-------------|
+| `sync_day` | 31 days | Explicitly sync days from Fitatu into SQLite |
+| `get_day_summary` | 7 days | Full nutrition summary including all meals and items |
+| `get_day_macros` | 31 days | Macro totals only (energy, protein, fat, carbs, fiber, sugars, salt) |
+| `get_day_meals` | 7 days | Meal summaries and items without day-level totals |
+| `get_cache_stats` | 31 days | Cached meal/item counts and macro totals |
 
 ## Local run
 
@@ -35,7 +34,7 @@ Then run:
 
 **PowerShell:**
 ```powershell
-pip install -r mcp_server/requirements.txt
+pip install -r requirements.txt
 $env:FITATU_USERNAME="your_email"
 $env:FITATU_PASSWORD="your_password"
 $env:FITATU_API_SECRET="your_api_secret"
@@ -44,7 +43,7 @@ python -m uvicorn fitatu_mcp.server:app --host 0.0.0.0 --port 8000
 
 **bash/zsh:**
 ```bash
-pip install -r mcp_server/requirements.txt
+pip install -r requirements.txt
 export FITATU_USERNAME="your_email"
 export FITATU_PASSWORD="your_password"
 export FITATU_API_SECRET="your_api_secret"
@@ -56,7 +55,7 @@ python -m uvicorn fitatu_mcp.server:app --host 0.0.0.0 --port 8000
 Build image:
 
 ```bash
-docker build -t fitatu-mcp-server ./mcp_server
+docker build -t fitatu-mcp-server .
 ```
 
 Run container (username/password passed at runtime):

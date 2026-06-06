@@ -2,7 +2,7 @@ import os
 import logging
 import re
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -175,11 +175,11 @@ def _cache_counts(db: Session, user_id: str, day_date: str) -> tuple[int, int]:
 def _load_or_sync_day(db: Session, user_id: str, day_date: str) -> DailyNutrition:
     day_row = _load_day(db, user_id, day_date)
 
-    if day_row and not _is_today_stale(day_row, day_date):
+    if day_row and not _is_stale(day_row, day_date):
         return day_row
 
     if day_row:
-        logger.info("Stale today cache for day_date=%s user_id=%s; triggering re-sync", day_date, user_id)
+        logger.info("Stale cache for day_date=%s user_id=%s; triggering re-sync", day_date, user_id)
     else:
         logger.info("Cache miss for day_date=%s user_id=%s; triggering auto-sync", day_date, user_id)
 
@@ -190,13 +190,22 @@ def _load_or_sync_day(db: Session, user_id: str, day_date: str) -> DailyNutritio
     return day_row
 
 
-def _is_today_stale(day_row: DailyNutrition, day_date: str) -> bool:
-    if day_date != date.today().isoformat():
-        return False
-    if day_row.updated_at is None:
-        return True
-    age_seconds = (datetime.now(timezone.utc) - day_row.updated_at.replace(tzinfo=timezone.utc)).total_seconds()
-    return age_seconds > TODAY_TTL_SECONDS
+def _is_stale(day_row: DailyNutrition, day_date: str) -> bool:
+    today = date.today()
+    parsed = date.fromisoformat(day_date)
+
+    if parsed == today:
+        if day_row.updated_at is None:
+            return True
+        age_seconds = (datetime.now(timezone.utc) - day_row.updated_at.replace(tzinfo=timezone.utc)).total_seconds()
+        return age_seconds > TODAY_TTL_SECONDS
+
+    if parsed == today - timedelta(days=1):
+        if day_row.updated_at is None:
+            return True
+        return day_row.updated_at.replace(tzinfo=timezone.utc).date() < today
+
+    return False
 
 
 @app.get("/health")

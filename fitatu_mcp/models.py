@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -36,6 +36,9 @@ class DailyNutrition(Base):
 
 class MealNutrition(Base):
     __tablename__ = "meal_nutrition"
+    __table_args__ = (
+        Index("uq_meal_nutrition_daily_meal", "daily_id", "meal_key", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     daily_id: Mapped[int] = mapped_column(ForeignKey("daily_nutrition.id", ondelete="CASCADE"), index=True)
@@ -66,6 +69,12 @@ class MealItem(Base):
     __tablename__ = "meal_item"
     __table_args__ = (
         UniqueConstraint("meal_id", "plan_day_diet_item_id", name="uq_meal_item_plan_id"),
+        Index(
+            "uq_meal_item_fallback",
+            "meal_id", "name", "product_id", "measure_quantity", "weight", "energy",
+            unique=True,
+            sqlite_where=text("plan_day_diet_item_id IS NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

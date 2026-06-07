@@ -13,7 +13,7 @@ FastAPI app  (server.py)
      ├── /health         — liveness probe
      └── /mcp            — MCP endpoint (mounted sub-app)
               │
-              └── MCP tools (5 tools, all defined in server.py)
+              └── MCP tools (4 tools, all defined in server.py)
                        │
                        ├── FitatuClient  (fitatu_client.py)   — talks to Fitatu API
                        ├── service.py                         — sync + persist logic
@@ -26,13 +26,17 @@ FastAPI app  (server.py)
 
 | File | Responsibility |
 |------|---------------|
-| `fitatu_mcp/server.py` | App wiring, auth middleware, all 5 MCP tool definitions, date validation helpers |
+| `fitatu_mcp/server.py` | App wiring, auth middleware, all 4 MCP tool definitions, date validation helpers |
 | `fitatu_mcp/service.py` | Business logic: aggregate API response → schema, persist to DB, sync orchestration |
 | `fitatu_mcp/fitatu_client.py` | HTTP client for Fitatu API (login, token refresh, fetch day data) |
 | `fitatu_mcp/models.py` | SQLAlchemy ORM models (3 tables) |
 | `fitatu_mcp/schemas.py` | Pydantic models used as in-memory data transfer objects |
 | `fitatu_mcp/database.py` | SQLAlchemy engine + session factory, `init_db()` |
+| `tests/helpers.py` | Shared DB insert helpers for tests |
 | `tests/test_staleness.py` | Unit tests for cache staleness logic |
+| `tests/test_service.py` | Unit tests for service layer functions |
+| `tests/test_server.py` | Integration tests for server-level helpers (cache counts) |
+| `tests/test_models.py` | DB constraint tests (unique indexes) |
 
 ---
 
@@ -57,9 +61,16 @@ daily_nutrition          (one row per user+day)
                eaten
 ```
 
-**Key constraints:**
-- `daily_nutrition`: unique on `(user_id, day_date)`
-- `meal_item`: unique on `(meal_id, plan_day_diet_item_id)` — but only enforced when `plan_day_diet_item_id` is not NULL (SQLite NULL caveat)
+**Unique indexes:**
+
+| Table | Index | Columns | Notes |
+|-------|-------|---------|-------|
+| `daily_nutrition` | `uq_daily_nutrition_user_day` | `(user_id, day_date)` | UniqueConstraint |
+| `meal_nutrition` | `uq_meal_nutrition_daily_meal` | `(daily_id, meal_key)` | Unique Index |
+| `meal_item` | `uq_meal_item_plan_id` | `(meal_id, plan_day_diet_item_id)` | UniqueConstraint; not enforced when `plan_day_diet_item_id` is NULL (SQLite behaviour) |
+| `meal_item` | `uq_meal_item_fallback` | `(meal_id, name, product_id, measure_quantity, weight, energy)` | Partial unique index; `WHERE plan_day_diet_item_id IS NULL` only |
+
+Both `meal_nutrition` and `meal_item` indexes use `Index(unique=True)` rather than `UniqueConstraint` so SQLAlchemy emits `CREATE UNIQUE INDEX IF NOT EXISTS`, which applies to existing tables without a manual migration.
 
 **Totals are denormalised:** `meal_nutrition.total_*` = sum of its items; `daily_nutrition.total_*` = sum of its meals. Recalculated on every sync.
 
@@ -83,18 +94,37 @@ DaySummarySchema
 
 ## Request / Data Flow
 
+### Tool handler pattern
+
+All tool handlers are `async def` and use `asyncio.to_thread` to avoid blocking the event loop. Date validation runs on the event loop (pure CPU). Everything from the DB session onwards runs in a thread pool:
+
+```python
+async def mcp_get_day_macros(start_date, end_date=""):
+    start, end = _validate_date_range(...)   # on event loop
+
+    def _run():
+        with SessionLocal() as db:           # in thread
+            ...                              # DB + HTTP work
+        return _range_envelope(...)
+
+    return await asyncio.to_thread(_run)
+```
+
+Each `_run()` creates its own `SessionLocal` context so sessions are fully contained within their thread.
+
 ### Happy path — cached day
 
 ```
 n8n calls get_day_macros("2026-06-04")
-  → _validate_date_range
-  → SessionLocal (open DB session)
-  → _ensure_user_id  (login if no active session)
-  → _load_or_sync_day
-      → _load_day (joinedload query)
-      → _is_today_stale? No → return cached row
-  → build MacroTotals from row fields
-  → return dict
+  → _validate_date_range          (event loop)
+  → asyncio.to_thread(_run)       (thread pool)
+      → SessionLocal (open DB session)
+      → _ensure_user_id  (login if no active session)
+      → _load_or_sync_day
+          → _load_day (joinedload query)
+          → _is_stale? No → return cached row
+      → build MacroTotals from row fields
+      → return dict
 ```
 
 ### Cache miss or stale — triggers sync
@@ -103,11 +133,10 @@ n8n calls get_day_macros("2026-06-04")
 _load_or_sync_day
   → _load_day returns None (or stale)
   → sync_day_from_fitatu(db, client, day_date)
-      → client.get_day(day_date)        ← HTTP GET to Fitatu
-      → aggregate_day_summary()         ← raw dict → DaySummarySchema
-      → persist_day_summary(db, summary) ← upsert into SQLite
-      → re-query DB → DaySummarySchema  ← returns fresh schema
-  → _load_day again → return fresh row
+      → client.get_day(day_date)         ← HTTP GET to Fitatu (blocking, in thread)
+      → aggregate_day_summary()          ← raw dict → DaySummarySchema
+      → persist_day_summary(db, summary) ← upsert into SQLite; returns day_row
+  → return day_row
 ```
 
 ### Sync / persist detail (persist_day_summary)
@@ -119,7 +148,9 @@ _load_or_sync_day
    - Delete items no longer in meal; upsert items by `_item_key`
 4. Flush, recalculate all meal totals via `_recalculate_meal_totals`
 5. Roll up meal totals into day totals
-6. Commit
+6. Commit, return `day_row`
+
+`_item_key` deduplicates items by `plan_day_diet_item_id` when present, or by a fallback tuple of `(name, product_id, measure_quantity, weight, energy)` when not. Works via duck typing on both `MealItem` (ORM) and `MealItemSchema` (Pydantic).
 
 ---
 
@@ -139,8 +170,6 @@ Configured via env var `FITATU_TODAY_TTL_SECONDS`.
 
 ## MCP Tools
 
-All tools follow the same pattern: validate dates → open DB session → per-day loop → auto-sync on miss → return `_range_envelope`.
-
 | Tool | Max range | Auto-syncs? | Returns |
 |------|-----------|-------------|---------|
 | `sync_day` | 31 days | Always (explicit sync) | cache before/after delta |
@@ -152,6 +181,8 @@ All responses are wrapped in `_range_envelope`:
 ```json
 { "start_date": "...", "end_date": "...", "day_count": N, "days": [...] }
 ```
+
+`get_cache_stats` uses `_load_day` directly (no auto-sync). Uncached days return `{"day_date": "...", "cached": false}`. Safe to call as a diagnostic without side effects.
 
 ---
 

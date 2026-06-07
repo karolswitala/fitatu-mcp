@@ -1,6 +1,7 @@
 import os
 import logging
 import re
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 
@@ -224,31 +225,35 @@ def health() -> dict[str, str]:
         "Maximum range: 31 days."
     ),
 )
-def mcp_sync_day(start_date: str, end_date: str = "") -> dict:
+async def mcp_sync_day(start_date: str, end_date: str = "") -> dict:
     end_date = end_date or start_date
     logger.info("Tool sync_day called start_date=%s end_date=%s", start_date, end_date)
     start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_COMPACT)
-    days = []
-    with SessionLocal() as db:
-        user_id = _ensure_user_id()
-        for day_date in _iter_date_range(start, end):
-            before_meals, before_items = _cache_counts(db, user_id, day_date)
-            summary = sync_day_from_fitatu(db, client, day_date)
-            after_meals, after_items = _cache_counts(db, summary.user_id, day_date)
-            days.append({
-                "status": "synced",
-                "user_id": summary.user_id,
-                "day_date": summary.day_date,
-                "totals": summary.totals.model_dump(),
-                "cache": {
-                    "meals_before": before_meals,
-                    "meals_after": after_meals,
-                    "items_before": before_items,
-                    "items_after": after_items,
-                },
-            })
-            logger.info("sync_day synced day_date=%s meals=%s items=%s", day_date, after_meals, after_items)
-    return _range_envelope(start_date, end_date, days)
+
+    def _run() -> dict:
+        days = []
+        with SessionLocal() as db:
+            user_id = _ensure_user_id()
+            for day_date in _iter_date_range(start, end):
+                before_meals, before_items = _cache_counts(db, user_id, day_date)
+                summary = sync_day_from_fitatu(db, client, day_date)
+                after_meals, after_items = _cache_counts(db, summary.user_id, day_date)
+                days.append({
+                    "status": "synced",
+                    "user_id": summary.user_id,
+                    "day_date": summary.day_date,
+                    "totals": summary.totals.model_dump(),
+                    "cache": {
+                        "meals_before": before_meals,
+                        "meals_after": after_meals,
+                        "items_before": before_items,
+                        "items_after": after_items,
+                    },
+                })
+                logger.info("sync_day synced day_date=%s meals=%s items=%s", day_date, after_meals, after_items)
+        return _range_envelope(start_date, end_date, days)
+
+    return await asyncio.to_thread(_run)
 
 
 @mcp.tool(
@@ -260,21 +265,25 @@ def mcp_sync_day(start_date: str, end_date: str = "") -> dict:
         "Auto-syncs from Fitatu if the day is not cached or is stale."
     ),
 )
-def mcp_get_day_summary(start_date: str, end_date: str = "") -> dict:
+async def mcp_get_day_summary(start_date: str, end_date: str = "") -> dict:
     end_date = end_date or start_date
     logger.info("Tool get_day_summary called start_date=%s end_date=%s", start_date, end_date)
     start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_VERBOSE)
-    days = []
-    with SessionLocal() as db:
-        user_id = _ensure_user_id()
-        for day_date in _iter_date_range(start, end):
-            try:
-                day_row = _load_or_sync_day(db, user_id, day_date)
-                days.append(db_day_to_schema(day_row).model_dump())
-            except Exception as exc:
-                logger.warning("get_day_summary failed for day_date=%s: %s", day_date, exc)
-                days.append({"day_date": day_date, "error": str(exc)})
-    return _range_envelope(start_date, end_date, days)
+
+    def _run() -> dict:
+        days = []
+        with SessionLocal() as db:
+            user_id = _ensure_user_id()
+            for day_date in _iter_date_range(start, end):
+                try:
+                    day_row = _load_or_sync_day(db, user_id, day_date)
+                    days.append(db_day_to_schema(day_row).model_dump())
+                except Exception as exc:
+                    logger.warning("get_day_summary failed for day_date=%s: %s", day_date, exc)
+                    days.append({"day_date": day_date, "error": str(exc)})
+        return _range_envelope(start_date, end_date, days)
+
+    return await asyncio.to_thread(_run)
 
 
 @mcp.tool(
@@ -286,30 +295,34 @@ def mcp_get_day_summary(start_date: str, end_date: str = "") -> dict:
         "Auto-syncs from Fitatu if the day is not cached or is stale."
     ),
 )
-def mcp_get_day_macros(start_date: str, end_date: str = "") -> dict:
+async def mcp_get_day_macros(start_date: str, end_date: str = "") -> dict:
     end_date = end_date or start_date
     logger.info("Tool get_day_macros called start_date=%s end_date=%s", start_date, end_date)
     start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_COMPACT)
-    days = []
-    with SessionLocal() as db:
-        user_id = _ensure_user_id()
-        for day_date in _iter_date_range(start, end):
-            try:
-                day_row = _load_or_sync_day(db, user_id, day_date)
-                macros = MacroTotals(
-                    energy=day_row.total_energy,
-                    protein=day_row.total_protein,
-                    fat=day_row.total_fat,
-                    carbohydrate=day_row.total_carbohydrate,
-                    fiber=day_row.total_fiber,
-                    sugars=day_row.total_sugars,
-                    salt=day_row.total_salt,
-                ).model_dump()
-                days.append({"day_date": day_date, **macros})
-            except Exception as exc:
-                logger.warning("get_day_macros failed for day_date=%s: %s", day_date, exc)
-                days.append({"day_date": day_date, "error": str(exc)})
-    return _range_envelope(start_date, end_date, days)
+
+    def _run() -> dict:
+        days = []
+        with SessionLocal() as db:
+            user_id = _ensure_user_id()
+            for day_date in _iter_date_range(start, end):
+                try:
+                    day_row = _load_or_sync_day(db, user_id, day_date)
+                    macros = MacroTotals(
+                        energy=day_row.total_energy,
+                        protein=day_row.total_protein,
+                        fat=day_row.total_fat,
+                        carbohydrate=day_row.total_carbohydrate,
+                        fiber=day_row.total_fiber,
+                        sugars=day_row.total_sugars,
+                        salt=day_row.total_salt,
+                    ).model_dump()
+                    days.append({"day_date": day_date, **macros})
+                except Exception as exc:
+                    logger.warning("get_day_macros failed for day_date=%s: %s", day_date, exc)
+                    days.append({"day_date": day_date, "error": str(exc)})
+        return _range_envelope(start_date, end_date, days)
+
+    return await asyncio.to_thread(_run)
 
 
 
@@ -322,46 +335,50 @@ def mcp_get_day_macros(start_date: str, end_date: str = "") -> dict:
         "Maximum range: 31 days."
     ),
 )
-def mcp_get_cache_stats(start_date: str, end_date: str = "") -> dict:
+async def mcp_get_cache_stats(start_date: str, end_date: str = "") -> dict:
     end_date = end_date or start_date
     logger.info("Tool get_cache_stats called start_date=%s end_date=%s", start_date, end_date)
     start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_COMPACT)
-    days = []
-    with SessionLocal() as db:
-        user_id = _ensure_user_id()
-        for day_date in _iter_date_range(start, end):
-            try:
-                day_row = _load_day(db, user_id, day_date)
-                if day_row is None:
-                    days.append({"day_date": day_date, "cached": False})
-                    continue
-                days.append({
-                    "day_date": day_row.day_date.isoformat(),
-                    "cached": True,
-                    "user_id": day_row.user_id,
-                    "updated_at": day_row.updated_at.isoformat() if day_row.updated_at else None,
-                    "totals": {
-                        "energy": day_row.total_energy,
-                        "protein": day_row.total_protein,
-                        "fat": day_row.total_fat,
-                        "carbohydrate": day_row.total_carbohydrate,
-                        "fiber": day_row.total_fiber,
-                        "sugars": day_row.total_sugars,
-                        "salt": day_row.total_salt,
-                    },
-                    "cache": {
-                        "meals": len(day_row.meals),
-                        "items": sum(len(meal.items) for meal in day_row.meals),
-                        "per_meal": [
-                            {"meal_key": meal.meal_key, "meal_name": meal.meal_name, "items": len(meal.items)}
-                            for meal in day_row.meals
-                        ],
-                    },
-                })
-            except Exception as exc:
-                logger.warning("get_cache_stats failed for day_date=%s: %s", day_date, exc)
-                days.append({"day_date": day_date, "error": str(exc)})
-    return _range_envelope(start_date, end_date, days)
+
+    def _run() -> dict:
+        days = []
+        with SessionLocal() as db:
+            user_id = _ensure_user_id()
+            for day_date in _iter_date_range(start, end):
+                try:
+                    day_row = _load_day(db, user_id, day_date)
+                    if day_row is None:
+                        days.append({"day_date": day_date, "cached": False})
+                        continue
+                    days.append({
+                        "day_date": day_row.day_date.isoformat(),
+                        "cached": True,
+                        "user_id": day_row.user_id,
+                        "updated_at": day_row.updated_at.isoformat() if day_row.updated_at else None,
+                        "totals": {
+                            "energy": day_row.total_energy,
+                            "protein": day_row.total_protein,
+                            "fat": day_row.total_fat,
+                            "carbohydrate": day_row.total_carbohydrate,
+                            "fiber": day_row.total_fiber,
+                            "sugars": day_row.total_sugars,
+                            "salt": day_row.total_salt,
+                        },
+                        "cache": {
+                            "meals": len(day_row.meals),
+                            "items": sum(len(meal.items) for meal in day_row.meals),
+                            "per_meal": [
+                                {"meal_key": meal.meal_key, "meal_name": meal.meal_name, "items": len(meal.items)}
+                                for meal in day_row.meals
+                            ],
+                        },
+                    })
+                except Exception as exc:
+                    logger.warning("get_cache_stats failed for day_date=%s: %s", day_date, exc)
+                    days.append({"day_date": day_date, "error": str(exc)})
+        return _range_envelope(start_date, end_date, days)
+
+    return await asyncio.to_thread(_run)
 
 
 app.mount("/mcp", mcp_app)

@@ -14,13 +14,12 @@ Sync is additive: only new meal items are inserted; existing cached items are pr
 All tools accept `start_date` (required, YYYY-MM-DD) and `end_date` (optional, defaults to `start_date`).
 Tools other than `sync_day` auto-sync from Fitatu if the requested day is not cached or is stale.
 
-| Tool | Max range | Description |
-|------|-----------|-------------|
-| `sync_day` | 31 days | Explicitly sync days from Fitatu into SQLite |
-| `get_day_summary` | 7 days | Full nutrition summary including all meals and items |
-| `get_day_macros` | 31 days | Macro totals only (energy, protein, fat, carbs, fiber, sugars, salt) |
-| `get_day_meals` | 7 days | Meal summaries and items without day-level totals |
-| `get_cache_stats` | 31 days | Cached meal/item counts and macro totals |
+| Tool | Max range | Auto-syncs | Description |
+|------|-----------|------------|-------------|
+| `sync_day` | 31 days | Always | Explicitly sync days from Fitatu into SQLite |
+| `get_day_summary` | 7 days | Yes | Full nutrition summary including all meals and items |
+| `get_day_macros` | 31 days | Yes | Macro totals only (energy, protein, fat, carbs, fiber, sugars, salt) |
+| `get_cache_stats` | 31 days | No | Inspect the local cache — returns `cached: false` for uncached days |
 
 ## Local run
 

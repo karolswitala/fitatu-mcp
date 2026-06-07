@@ -312,44 +312,14 @@ def mcp_get_day_macros(start_date: str, end_date: str = "") -> dict:
     return _range_envelope(start_date, end_date, days)
 
 
-@mcp.tool(
-    name="get_day_meals",
-    description=(
-        "Get meal summaries and meal items for a date range. "
-        "start_date is required (YYYY-MM-DD). end_date defaults to start_date. "
-        "Maximum range: 7 days. "
-        "Auto-syncs from Fitatu if the day is not cached or is stale."
-    ),
-)
-def mcp_get_day_meals(start_date: str, end_date: str = "") -> dict:
-    end_date = end_date or start_date
-    logger.info("Tool get_day_meals called start_date=%s end_date=%s", start_date, end_date)
-    start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_VERBOSE)
-    days = []
-    with SessionLocal() as db:
-        user_id = _ensure_user_id()
-        for day_date in _iter_date_range(start, end):
-            try:
-                day_row = _load_or_sync_day(db, user_id, day_date)
-                summary = db_day_to_schema(day_row)
-                days.append({
-                    "day_date": summary.day_date,
-                    "user_id": summary.user_id,
-                    "meals": [m.model_dump() for m in summary.meals],
-                })
-            except Exception as exc:
-                logger.warning("get_day_meals failed for day_date=%s: %s", day_date, exc)
-                days.append({"day_date": day_date, "error": str(exc)})
-    return _range_envelope(start_date, end_date, days)
-
 
 @mcp.tool(
     name="get_cache_stats",
     description=(
-        "Get cached meal/item counts and macro totals for a date range. "
+        "Inspect the local SQLite cache for a date range without hitting Fitatu. "
+        "Returns cached meal/item counts and macro totals, or cached=false for uncached days. "
         "start_date is required (YYYY-MM-DD). end_date defaults to start_date. "
-        "Maximum range: 31 days. "
-        "Auto-syncs from Fitatu if the day is not cached or is stale."
+        "Maximum range: 31 days."
     ),
 )
 def mcp_get_cache_stats(start_date: str, end_date: str = "") -> dict:
@@ -361,9 +331,13 @@ def mcp_get_cache_stats(start_date: str, end_date: str = "") -> dict:
         user_id = _ensure_user_id()
         for day_date in _iter_date_range(start, end):
             try:
-                day_row = _load_or_sync_day(db, user_id, day_date)
+                day_row = _load_day(db, user_id, day_date)
+                if day_row is None:
+                    days.append({"day_date": day_date, "cached": False})
+                    continue
                 days.append({
                     "day_date": day_row.day_date.isoformat(),
+                    "cached": True,
                     "user_id": day_row.user_id,
                     "updated_at": day_row.updated_at.isoformat() if day_row.updated_at else None,
                     "totals": {

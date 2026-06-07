@@ -144,10 +144,9 @@ All tools follow the same pattern: validate dates → open DB session → per-da
 | Tool | Max range | Auto-syncs? | Returns |
 |------|-----------|-------------|---------|
 | `sync_day` | 31 days | Always (explicit sync) | cache before/after delta |
-| `get_day_summary` | 7 days | On miss/stale | full meals + items |
+| `get_day_summary` | 7 days | On miss/stale | full meals + items + day totals |
 | `get_day_macros` | 31 days | On miss/stale | macro totals only |
-| `get_day_meals` | 7 days | On miss/stale | meals + items (no day totals) |
-| `get_cache_stats` | 31 days | On miss/stale | cache counts + totals |
+| `get_cache_stats` | 31 days | Never (read-only) | cache counts + totals, or `cached: false` |
 
 All responses are wrapped in `_range_envelope`:
 ```json

@@ -11,10 +11,7 @@ import pytest
 
 def _base_env(**overrides) -> dict:
     env = {
-        "FITATU_USERNAME": "u",
-        "FITATU_PASSWORD": "p",
         "FITATU_API_SECRET": "s",
-        "MCP_API_KEY": "mcp-key",
         "FITATU_DB_FILE": ":memory:",
         "FITATU_ALLOW_DELETE": "false",
     }
@@ -31,12 +28,11 @@ def _call_tool_sync(mcp, name: str, args: dict) -> dict:
 
 
 @pytest.fixture
-def app_mcp():
+def app_mcp(stub_fitatu_client):
     from mcp_server import server
 
     app, mcp = server.build_app(_base_env())
-    app.state.fitatu_client.user_id = "42"
-    app.state.fitatu_client.token = "tok"
+    app.state.session_pool._test_default_client = stub_fitatu_client
     return app, mcp
 
 

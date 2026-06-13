@@ -6,10 +6,9 @@ import os
 
 
 def test_env_stubs_loaded():
-    """Root conftest must populate Fitatu env vars before pytest collection."""
-    assert os.environ["FITATU_USERNAME"]
+    """Root conftest must populate the API secret before pytest collection."""
     assert os.environ["FITATU_API_SECRET"]
-    assert os.environ["MCP_API_KEY"]
+    assert os.environ["FITATU_DB_FILE"]
 
 
 def test_in_memory_db_has_tables(in_memory_engine):

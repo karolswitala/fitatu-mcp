@@ -26,3 +26,7 @@ def _apply_additive_migrations() -> None:
         if "barcode" not in cols:
             conn.execute(text("ALTER TABLE products ADD COLUMN barcode VARCHAR(64)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_products_barcode ON products(barcode)"))
+        if "user_id" not in cols:
+            conn.execute(text("ALTER TABLE products ADD COLUMN user_id VARCHAR(64)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_products_user_id ON products(user_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_products_user_source ON products(user_id, source)"))

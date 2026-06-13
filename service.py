@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 import logging
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, joinedload, object_session
 
 from .fitatu_client import FitatuClient
@@ -345,11 +345,19 @@ _FITATU_TO_LOCAL = {
 }
 
 
-def upsert_product(db: Session, payload: dict, source: str = "custom") -> Product:
+def upsert_product(
+    db: Session,
+    payload: dict,
+    source: str = "custom",
+    user_id: str | None = None,
+) -> Product:
     """Insert or update a Product row keyed by Fitatu product id.
 
     Maps Fitatu's response keys (camelCase) to local snake_case columns.
     Stores the full payload as a JSON string in `raw` for forensics.
+    When `source == "custom"` and `user_id` is provided, the row is stamped
+    with that owner so multi-user search can scope custom products correctly.
+    Catalog rows keep `user_id=None` (globally shared cache).
     """
     product_id = payload.get("id")
     if product_id is None:
@@ -369,6 +377,7 @@ def upsert_product(db: Session, payload: dict, source: str = "custom") -> Produc
             id=product_id,
             source=source,
             raw=raw_json,
+            user_id=user_id if source == "custom" else None,
             **column_values,
         )
         db.add(product)
@@ -380,6 +389,10 @@ def upsert_product(db: Session, payload: dict, source: str = "custom") -> Produc
     # Source is sticky: don't downgrade a custom row to catalog by re-fetching.
     if existing.source != source and source == "custom":
         existing.source = source
+    # Stamp ownership when a custom row is upserted with a user_id (e.g. user
+    # re-creates an unowned legacy row).
+    if source == "custom" and user_id is not None and existing.user_id is None:
+        existing.user_id = user_id
     return existing
 
 
@@ -387,21 +400,43 @@ def get_product_local(db: Session, product_id: int) -> Product | None:
     return db.get(Product, product_id)
 
 
-def delete_product(db: Session, product_id: int) -> bool:
+def delete_product(db: Session, product_id: int, user_id: str) -> bool:
+    """Delete a custom product. Refuses to delete a row owned by another user."""
     existing = db.get(Product, product_id)
     if existing is None:
         return False
+    if existing.source == "custom" and existing.user_id is not None and existing.user_id != user_id:
+        raise ValueError(
+            f"product {product_id} belongs to a different user; refusing to delete"
+        )
     db.delete(existing)
     return True
 
 
-def search_products_local(db: Session, query: str, scope: str, limit: int) -> list[Product]:
+def search_products_local(
+    db: Session,
+    query: str,
+    scope: str,
+    limit: int,
+    user_id: str | None = None,
+) -> list[Product]:
     stmt = select(Product).where(Product.name.ilike(f"%{query}%"))
     if scope == "custom":
-        stmt = stmt.where(Product.source == "custom")
+        if user_id is None:
+            raise ValueError("user_id is required when scope='custom'")
+        stmt = stmt.where(Product.source == "custom", Product.user_id == user_id)
     elif scope == "catalog":
         stmt = stmt.where(Product.source == "catalog")
-    elif scope != "all":
+    elif scope == "all":
+        if user_id is None:
+            raise ValueError("user_id is required when scope='all'")
+        stmt = stmt.where(
+            or_(
+                and_(Product.source == "custom", Product.user_id == user_id),
+                Product.source == "catalog",
+            )
+        )
+    else:
         raise ValueError(f"scope must be one of custom|catalog|all (got {scope!r})")
     stmt = stmt.limit(limit)
     return list(db.execute(stmt).scalars())

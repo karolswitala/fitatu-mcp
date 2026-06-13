@@ -66,5 +66,6 @@ class ProductSchema(BaseModel):
     sugars: float | None = None
     cholesterol: float | None = None
     barcode: str | None = None
+    user_id: str | None = None
     source: str
     created_at: datetime

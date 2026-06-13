@@ -12,11 +12,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 
-# Set env stubs BEFORE any package import (fitatu_client.py reads FITATU_API_SECRET at module-import time).
-os.environ.setdefault("FITATU_USERNAME", "test-user")
-os.environ.setdefault("FITATU_PASSWORD", "test-pass")
+# Set env stubs BEFORE any package import. Multi-user auth no longer reads
+# FITATU_USERNAME/PASSWORD/MCP_API_KEY — clients authenticate per-request.
 os.environ.setdefault("FITATU_API_SECRET", "test-secret")
-os.environ.setdefault("MCP_API_KEY", "test-mcp-key")
 os.environ.setdefault("FITATU_DB_FILE", ":memory:")
 
 # Register the repo dir as `mcp_server` so production-style imports work.

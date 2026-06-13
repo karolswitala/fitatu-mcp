@@ -20,10 +20,7 @@ import pytest
 
 def _base_env(**overrides) -> dict:
     env = {
-        "FITATU_USERNAME": "u",
-        "FITATU_PASSWORD": "p",
         "FITATU_API_SECRET": "s",
-        "MCP_API_KEY": "mcp-key",
         "FITATU_DB_FILE": ":memory:",
         "FITATU_ALLOW_DELETE": "false",
     }

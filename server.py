@@ -6,11 +6,11 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from typing import Mapping
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from mcp.server.fastmcp import FastMCP
+from fastapi import FastAPI
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from sqlalchemy.orm import Session, joinedload
+from .auth import SessionPool, decode_basic_header
 from .database import SessionLocal, init_db
 from .fitatu_client import FitatuClient
 from .models import DailyNutrition, MealNutrition
@@ -107,24 +107,22 @@ def _is_today_stale(day_row: DailyNutrition, day_date: str, today_ttl_seconds: i
 def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
     """Construct (FastAPI, FastMCP) pair from env mapping.
 
-    Env keys consumed:
-      - FITATU_USERNAME, FITATU_PASSWORD, MCP_API_KEY (required)
-      - FITATU_API_SECRET (optional; built-in default is used when unset)
-      - FITATU_BASE_URL_READ, FITATU_BASE_URL_WRITE (optional client overrides)
+    Per-user auth — each MCP request resolves to its own FitatuClient via header:
+      - X-Fitatu-Session: <session_id>            (from fitatu_login tool)
+      - Authorization: Basic base64(email:pwd)    (static client config)
+
+    Env keys consumed (all optional except where noted):
+      - FITATU_API_SECRET (optional; built-in default)
+      - FITATU_BASE_URL_READ, FITATU_BASE_URL_WRITE (optional cluster overrides)
       - FITATU_ALLOW_DELETE (default false; gates destructive tools)
-      - FITATU_TODAY_TTL_SECONDS, MCP_ENABLE_DNS_REBINDING_PROTECTION, MCP_ALLOWED_HOSTS (server config)
+      - FITATU_TODAY_TTL_SECONDS, FITATU_SESSION_TTL_SECONDS, FITATU_SESSION_POOL_MAX
+      - MCP_ENABLE_DNS_REBINDING_PROTECTION, MCP_ALLOWED_HOSTS
     """
     env = env if env is not None else os.environ
 
-    username = env.get("FITATU_USERNAME")
-    password = env.get("FITATU_PASSWORD")
-    mcp_api_key = env.get("MCP_API_KEY")
-    if not username or not password:
-        raise RuntimeError("FITATU_USERNAME and FITATU_PASSWORD must be set")
-    if not mcp_api_key:
-        raise RuntimeError("MCP_API_KEY must be set")
-
     today_ttl = int(env.get("FITATU_TODAY_TTL_SECONDS", "300"))
+    session_ttl = int(env.get("FITATU_SESSION_TTL_SECONDS", str(30 * 24 * 3600)))
+    pool_max = int(env.get("FITATU_SESSION_POOL_MAX", "64"))
     dns_rebind = (env.get("MCP_ENABLE_DNS_REBINDING_PROTECTION", "false").lower() in {"1", "true", "yes", "on"})
     allowed_hosts_csv = env.get(
         "MCP_ALLOWED_HOSTS",
@@ -132,11 +130,11 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
     )
     allow_delete = env.get("FITATU_ALLOW_DELETE", "false").lower() in {"1", "true", "yes", "on"}
 
-    client = FitatuClient(
-        username,
-        password,
+    pool = SessionPool(
         base_url_read=env.get("FITATU_BASE_URL_READ"),
         base_url_write=env.get("FITATU_BASE_URL_WRITE"),
+        idle_ttl_seconds=session_ttl,
+        max_size=pool_max,
     )
 
     transport_security = TransportSecuritySettings(
@@ -149,20 +147,63 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
         instructions=(
             "Use tools to sync, read, and write daily nutrition. "
             "Meal items (add/update/delete) log what the user actually ate; "
-            "products (create/get/delete/search) manage the user's reusable food catalog."
+            "products (create/get/delete/search) manage the user's reusable food catalog. "
+            "Authentication: call fitatu_login(email, password) to mint a session, then send "
+            "X-Fitatu-Session header. Or configure Authorization: Basic at the client level."
         ),
         streamable_http_path="/",
         transport_security=transport_security,
     )
 
-    def _ensure_user_id() -> str:
-        if not client.user_id:
-            client.login()
-        if not client.user_id:
-            raise ValueError("Could not determine user_id after login")
-        return client.user_id
+    async def _resolve_client(ctx: Context) -> FitatuClient:
+        """Resolve the FitatuClient for the current MCP request.
 
-    def _load_or_sync_day(db: Session, user_id: str, day_date: str) -> DailyNutrition:
+        Inspects the inbound Starlette Request headers in precedence order:
+          1. X-Fitatu-Session header (preferred — after fitatu_login)
+          2. Authorization: Basic base64(email:password)  (static client config)
+        Raises ValueError with a friendly message when neither is present or valid.
+        """
+        req = None
+        try:
+            if ctx is not None:
+                rc = ctx.request_context
+                req = rc.request if rc is not None else None
+        except Exception:
+            # FastMCP raises when no MCP request context is active
+            # (e.g. in-process pytest call_tool). Fall through to test seam.
+            pass
+        if req is None:
+            # Test seam: in-process tool calls without a real HTTP request
+            # short-circuit to a pool-configured default client (set by tests).
+            if pool._test_default_client is not None:
+                return pool._test_default_client
+            raise ValueError(
+                "auth_required: no HTTP request context. "
+                "Pass X-Fitatu-Session or Authorization: Basic."
+            )
+        sid = req.headers.get("X-Fitatu-Session")
+        if sid:
+            client = pool.resolve_session(sid)
+            if client is None:
+                raise ValueError(
+                    "auth_invalid: X-Fitatu-Session is unknown or expired; "
+                    "call fitatu_login again to mint a fresh session."
+                )
+            return client
+        auth = req.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            b64 = auth[6:].strip()
+            cached = pool.resolve_basic_cached(b64)
+            if cached is not None:
+                return cached
+            email, password = decode_basic_header(b64)
+            return await pool.get_or_login(email, password)
+        raise ValueError(
+            "auth_required: pass X-Fitatu-Session (from fitatu_login) "
+            "or Authorization: Basic base64(email:password)"
+        )
+
+    async def _load_or_sync_day(db: Session, client: FitatuClient, user_id: str, day_date: str) -> DailyNutrition:
         day_row = _load_day(db, user_id, day_date)
         if day_row and not _is_today_stale(day_row, day_date, today_ttl):
             return day_row
@@ -176,6 +217,33 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             raise ValueError("Day data not found after auto-sync. Check Fitatu source data.")
         return day_row
 
+    # -- Auth tool --
+
+    @mcp.tool(
+        name="fitatu_login",
+        description=(
+            "Authenticate against Fitatu with your account email and password, returning a "
+            "session_id to pass as the X-Fitatu-Session header on subsequent tool calls. "
+            "SECURITY: this writes your password into chat history; prefer configuring "
+            "Authorization: Basic at the MCP client level when possible. The server NEVER "
+            "persists credentials to disk; they live only in process memory."
+        ),
+    )
+    async def mcp_fitatu_login(email: str, password: str, ctx: Context = None) -> dict:
+        if not email or not password:
+            raise ValueError("email and password are required")
+        client = await pool.get_or_login(email, password)
+        sid = await pool.register_session(client)
+        return {
+            "ok": True,
+            "session_id": sid,
+            "user_id": client.user_id,
+            "next_step": (
+                "Send subsequent requests with header `X-Fitatu-Session: <session_id>`. "
+                "Session expires after 30 days of inactivity."
+            ),
+        }
+
     # -- Existing read tools --
 
     @mcp.tool(
@@ -185,13 +253,14 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "start_date is required (YYYY-MM-DD). end_date defaults to start_date. Maximum range: 31 days."
         ),
     )
-    def mcp_sync_day(start_date: str, end_date: str = "") -> dict:
+    async def mcp_sync_day(start_date: str, end_date: str = "", ctx: Context = None) -> dict:
+        client = await _resolve_client(ctx)
         end_date = end_date or start_date
         logger.info("Tool sync_day called start_date=%s end_date=%s", start_date, end_date)
         start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_COMPACT)
         days = []
         with SessionLocal() as db:
-            user_id = _ensure_user_id()
+            user_id = client.user_id
             for day_date in _iter_date_range(start, end):
                 before_meals, before_items = _cache_counts(db, user_id, day_date)
                 summary = sync_day_from_fitatu(db, client, day_date)
@@ -217,15 +286,16 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "start_date is required (YYYY-MM-DD). end_date defaults to start_date. Maximum range: 7 days."
         ),
     )
-    def mcp_get_day_summary(start_date: str, end_date: str = "") -> dict:
+    async def mcp_get_day_summary(start_date: str, end_date: str = "", ctx: Context = None) -> dict:
+        client = await _resolve_client(ctx)
         end_date = end_date or start_date
         start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_VERBOSE)
         days = []
         with SessionLocal() as db:
-            user_id = _ensure_user_id()
+            user_id = client.user_id
             for day_date in _iter_date_range(start, end):
                 try:
-                    day_row = _load_or_sync_day(db, user_id, day_date)
+                    day_row = await _load_or_sync_day(db, client, user_id, day_date)
                     days.append(db_day_to_schema(day_row).model_dump())
                 except Exception as exc:
                     logger.warning("get_day_summary failed for day_date=%s: %s", day_date, exc)
@@ -239,15 +309,16 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "start_date is required (YYYY-MM-DD). end_date defaults to start_date. Maximum range: 31 days."
         ),
     )
-    def mcp_get_day_macros(start_date: str, end_date: str = "") -> dict:
+    async def mcp_get_day_macros(start_date: str, end_date: str = "", ctx: Context = None) -> dict:
+        client = await _resolve_client(ctx)
         end_date = end_date or start_date
         start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_COMPACT)
         days = []
         with SessionLocal() as db:
-            user_id = _ensure_user_id()
+            user_id = client.user_id
             for day_date in _iter_date_range(start, end):
                 try:
-                    day_row = _load_or_sync_day(db, user_id, day_date)
+                    day_row = await _load_or_sync_day(db, client, user_id, day_date)
                     macros = MacroTotals(
                         energy=day_row.total_energy,
                         protein=day_row.total_protein,
@@ -270,15 +341,16 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "start_date is required (YYYY-MM-DD). end_date defaults to start_date. Maximum range: 7 days."
         ),
     )
-    def mcp_get_day_meals(start_date: str, end_date: str = "") -> dict:
+    async def mcp_get_day_meals(start_date: str, end_date: str = "", ctx: Context = None) -> dict:
+        client = await _resolve_client(ctx)
         end_date = end_date or start_date
         start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_VERBOSE)
         days = []
         with SessionLocal() as db:
-            user_id = _ensure_user_id()
+            user_id = client.user_id
             for day_date in _iter_date_range(start, end):
                 try:
-                    day_row = _load_or_sync_day(db, user_id, day_date)
+                    day_row = await _load_or_sync_day(db, client, user_id, day_date)
                     summary = db_day_to_schema(day_row)
                     days.append({
                         "day_date": summary.day_date,
@@ -297,15 +369,16 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "start_date is required (YYYY-MM-DD). end_date defaults to start_date. Maximum range: 31 days."
         ),
     )
-    def mcp_get_cache_stats(start_date: str, end_date: str = "") -> dict:
+    async def mcp_get_cache_stats(start_date: str, end_date: str = "", ctx: Context = None) -> dict:
+        client = await _resolve_client(ctx)
         end_date = end_date or start_date
         start, end = _validate_date_range(start_date, end_date, MAX_RANGE_DAYS_COMPACT)
         days = []
         with SessionLocal() as db:
-            user_id = _ensure_user_id()
+            user_id = client.user_id
             for day_date in _iter_date_range(start, end):
                 try:
-                    day_row = _load_or_sync_day(db, user_id, day_date)
+                    day_row = await _load_or_sync_day(db, client, user_id, day_date)
                     days.append({
                         "day_date": day_row.day_date.isoformat(),
                         "user_id": day_row.user_id,
@@ -342,7 +415,7 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "Macros are per 100g. Use -1 sentinel for optional macros to skip them."
         ),
     )
-    def mcp_create_custom_product(
+    async def mcp_create_custom_product(
         name: str,
         energy: float,
         protein: float,
@@ -355,7 +428,9 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
         saturated_fat: float = -1,
         sugars: float = -1,
         cholesterol: float = -1,
+        ctx: Context = None,
     ) -> dict:
+        client = await _resolve_client(ctx)
         name_clean = (name or "").strip()
         if not name_clean:
             raise ValueError("name must not be empty")
@@ -386,12 +461,12 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             if v is not None and v != -1:
                 payload[dest] = v
 
-        _ensure_user_id()
         created = client.create_product(payload)
         product_id = created.get("id")
         if product_id is None:
             raise RuntimeError(f"create_product returned no id: {created}")
 
+        user_id = client.user_id
         with SessionLocal() as db:
             local_cached = True
             try:
@@ -400,7 +475,7 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
                 logger.warning("Post-create get_product failed: %s", exc)
                 full = {"id": int(product_id), "name": name_clean, **{k: v for k, v in payload.items() if k != "name"}}
                 local_cached = False
-            product = service.upsert_product(db, full, source="custom")
+            product = service.upsert_product(db, full, source="custom", user_id=user_id)
             db.commit()
             schema = service.product_to_schema(product)
         return {"ok": True, "product": schema.model_dump(mode="json"), "local_cached": local_cached}
@@ -409,14 +484,14 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
         name="get_product",
         description="Get a single product by id. Reads local cache first; falls through to Fitatu on miss.",
     )
-    def mcp_get_product(product_id: int) -> dict:
+    async def mcp_get_product(product_id: int, ctx: Context = None) -> dict:
+        client = await _resolve_client(ctx)
         if product_id <= 0:
             raise ValueError("product_id must be a positive integer")
         with SessionLocal() as db:
             local = service.get_product_local(db, product_id)
             if local is not None:
                 return {"ok": True, "product": service.product_to_schema(local).model_dump(mode="json"), "from_cache": True}
-            _ensure_user_id()
             full = client.get_product(product_id)
             product = service.upsert_product(db, full, source="catalog")
             db.commit()
@@ -437,7 +512,7 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "(brand or product name) work best."
         ),
     )
-    def mcp_search_products(
+    async def mcp_search_products(
         query: str,
         scope: str = "custom",
         limit: int = 20,
@@ -450,7 +525,10 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
         max_fat: float = -1,
         min_carbohydrate: float = -1,
         max_carbohydrate: float = -1,
+        ctx: Context = None,
     ) -> dict:
+        client = await _resolve_client(ctx)
+        user_id = client.user_id
         q = (query or "").strip()
         type_filter_u = (type_filter or "PRODUCT").upper().strip()
 
@@ -469,7 +547,7 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
         custom_results: list[dict] = []
         if scope in {"custom", "all"}:
             with SessionLocal() as db:
-                rows = service.search_products_local(db, q, "custom", limit)
+                rows = service.search_products_local(db, q, "custom", limit, user_id=user_id)
                 custom_results = [
                     {
                         "id": r.id,
@@ -487,7 +565,6 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
         catalog_results: list[dict] = []
         warnings: list[str] = []
         if scope in {"catalog", "all"}:
-            _ensure_user_id()
             try:
                 hits = client.search_food(
                     phrase=q,
@@ -569,17 +646,18 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "food_type='PRODUCT' (default) or 'RECIPE'."
         ),
     )
-    def mcp_add_meal_item(
+    async def mcp_add_meal_item(
         date: str,
         meal_key: str,
         product_id: int,
         measure_id: int,
         measure_quantity: float,
         food_type: str = "PRODUCT",
+        ctx: Context = None,
     ) -> dict:
+        client = await _resolve_client(ctx)
         if product_id <= 0:
             raise ValueError("product_id must be a positive integer")
-        _ensure_user_id()
         with SessionLocal() as db:
             result = service.add_meal_item(
                 db, client, date, meal_key, product_id, measure_id, measure_quantity,
@@ -596,13 +674,14 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "`cleanup_failed: true` and a warning."
         ),
     )
-    def mcp_update_meal_item(
+    async def mcp_update_meal_item(
         date: str,
         meal_key: str,
         plan_day_diet_item_id: str,
         new_measure_quantity: float,
+        ctx: Context = None,
     ) -> dict:
-        _ensure_user_id()
+        client = await _resolve_client(ctx)
         with SessionLocal() as db:
             result = service.update_meal_item(
                 db, client, date, meal_key, plan_day_diet_item_id, new_measure_quantity,
@@ -620,8 +699,8 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "back to create_recipe via the `tags` argument."
         ),
     )
-    def mcp_get_recipe_tags() -> dict:
-        _ensure_user_id()
+    async def mcp_get_recipe_tags(ctx: Context = None) -> dict:
+        client = await _resolve_client(ctx)
         tags = client.get_recipe_tags()
         return {"ok": True, "count": len(tags), "tags": tags}
 
@@ -637,7 +716,7 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "Server returns id + computed macros (energy/protein/fat/carbohydrate per serving)."
         ),
     )
-    def mcp_create_recipe(
+    async def mcp_create_recipe(
         name: str,
         items_json: str,
         serving: str = "1",
@@ -647,7 +726,9 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
         meal_schema_csv: str = "",
         tags_json: str = "",
         shared: bool = False,
+        ctx: Context = None,
     ) -> dict:
+        client = await _resolve_client(ctx)
         name_clean = (name or "").strip()
         if not name_clean:
             raise ValueError("name must be non-empty")
@@ -715,7 +796,6 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             "tags": tags,
         }
 
-        _ensure_user_id()
         created = client.create_recipe(payload)
         return {"ok": True, "recipe": created}
 
@@ -724,13 +804,13 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
             name="delete_custom_product",
             description="Delete a user-owned product from the Fitatu catalog (and local cache). Requires FITATU_ALLOW_DELETE=true.",
         )
-        def mcp_delete_custom_product(product_id: int) -> dict:
+        async def mcp_delete_custom_product(product_id: int, ctx: Context = None) -> dict:
+            client = await _resolve_client(ctx)
             if product_id <= 0:
                 raise ValueError("product_id must be a positive integer")
-            _ensure_user_id()
             client.delete_product(product_id)
             with SessionLocal() as db:
-                service.delete_product(db, product_id)
+                service.delete_product(db, product_id, user_id=client.user_id)
                 db.commit()
             return {"ok": True, "deleted": True, "product_id": product_id}
 
@@ -741,12 +821,13 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
                 "Requires FITATU_ALLOW_DELETE=true."
             ),
         )
-        def mcp_delete_meal_item(
+        async def mcp_delete_meal_item(
             date: str,
             meal_key: str,
             plan_day_diet_item_id: str,
+            ctx: Context = None,
         ) -> dict:
-            _ensure_user_id()
+            client = await _resolve_client(ctx)
             with SessionLocal() as db:
                 result = service.delete_meal_item(
                     db, client, date, meal_key, plan_day_diet_item_id,
@@ -771,22 +852,8 @@ def build_app(env: Mapping[str, str] | None = None) -> tuple[FastAPI, FastMCP]:
     )
 
     # Expose for testing introspection
-    app.state.fitatu_client = client
+    app.state.session_pool = pool
     app.state.mcp = mcp
-
-    @app.middleware("http")
-    async def bearer_auth(request: Request, call_next):
-        if request.url.path.startswith("/mcp"):
-            auth = request.headers.get("Authorization", "")
-            if not auth.startswith("Bearer ") or auth[7:] != mcp_api_key:
-                logger.warning(
-                    "Unauthorized MCP request path=%s client=%s auth_prefix=%s",
-                    request.url.path,
-                    request.client.host if request.client else "unknown",
-                    auth[:16],
-                )
-                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-        return await call_next(request)
 
     @app.get("/health")
     def health() -> dict[str, str]:

@@ -11,10 +11,7 @@ import pytest
 
 def _base_env(**overrides) -> dict:
     env = {
-        "FITATU_USERNAME": "u",
-        "FITATU_PASSWORD": "p",
         "FITATU_API_SECRET": "s",
-        "MCP_API_KEY": "mcp-key",
         "FITATU_DB_FILE": ":memory:",
         "FITATU_ALLOW_DELETE": "false",
     }
@@ -38,8 +35,12 @@ def _call_tool_sync(mcp, name: str, args: dict) -> dict:
 
 
 @pytest.fixture
-def app_mcp(monkeypatch):
-    """Build app/mcp with a SessionLocal bound to an in-memory engine seeded with products."""
+def app_mcp(monkeypatch, stub_fitatu_client):
+    """Build app/mcp with a SessionLocal bound to an in-memory engine seeded with products.
+
+    Pool is configured with stub_fitatu_client as the test default so
+    in-process call_tool() short-circuits the per-request auth resolver.
+    """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -53,16 +54,15 @@ def app_mcp(monkeypatch):
     monkeypatch.setattr(server, "SessionLocal", TestSession)
 
     app, mcp = server.build_app(_base_env())
-    # Pre-seed user_id so _ensure_user_id() short-circuits and skips real login
-    app.state.fitatu_client.user_id = "42"
-    app.state.fitatu_client.token = "tok"
+    # Wire stub client as the default for in-process tool calls (no real HTTP request).
+    app.state.session_pool._test_default_client = stub_fitatu_client
 
-    # Seed
+    # Seed products belonging to the stub user (user_id="42") for custom search tests.
     from mcp_server.service import upsert_product
 
     with TestSession() as db:
-        upsert_product(db, {"id": 1, "name": "Homemade Hummus", "energy": 200, "protein": 8, "fat": 12, "carbohydrate": 15}, source="custom")
-        upsert_product(db, {"id": 2, "name": "Greek Yogurt", "energy": 60, "protein": 10, "fat": 0, "carbohydrate": 4}, source="custom")
+        upsert_product(db, {"id": 1, "name": "Homemade Hummus", "energy": 200, "protein": 8, "fat": 12, "carbohydrate": 15}, source="custom", user_id="42")
+        upsert_product(db, {"id": 2, "name": "Greek Yogurt", "energy": 60, "protein": 10, "fat": 0, "carbohydrate": 4}, source="custom", user_id="42")
         upsert_product(db, {"id": 3, "name": "Catalog Apple", "energy": 50, "protein": 0, "fat": 0, "carbohydrate": 12}, source="catalog")
         db.commit()
 

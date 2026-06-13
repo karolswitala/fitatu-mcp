@@ -1,20 +1,28 @@
 # Fitatu Nutrition MCP Server
 
-An [MCP](https://modelcontextprotocol.io) server that mirrors a user's daily Fitatu nutrition (meals + macros) into a local SQLite cache and exposes it over MCP Streamable HTTP. Sync is additive — known meal items are kept and new ones merged on each `sync_day`.
+An [MCP](https://modelcontextprotocol.io) server that mirrors users' daily Fitatu nutrition (meals + macros) into a local SQLite cache and exposes it over MCP Streamable HTTP. **Multi-user** — one server instance can serve many Fitatu accounts; each request authenticates with its own credentials. Server is zero-knowledge: it never persists Fitatu passwords or tokens to disk.
 
 - Transport: **MCP Streamable HTTP** (FastMCP, mounted under `/mcp`).
-- Inbound auth: static `Authorization: Bearer <MCP_API_KEY>`.
-- Outbound auth: Fitatu username/password + the `api-secret` header used by the web app.
-- Cache: SQLite at `${FITATU_DB_FILE:-/data/fitatu_nutrition.db}`.
+- Inbound auth: per-request, either `Authorization: Basic base64(email:password)` (static client config) or `X-Fitatu-Session: <session_id>` (after the `fitatu_login` tool).
+- Outbound auth: Fitatu username/password from the client request → JWT cached in process memory per Fitatu user.
+- Cache: SQLite at `${FITATU_DB_FILE:-/data/fitatu_nutrition.db}`. Cached data is scoped by Fitatu numeric user_id; users see only their own meals and custom products.
+
+> ⚠️ **DEPLOY BEHIND HTTPS.** Both ingress paths carry credentials (Basic) or live sessions (X-Fitatu-Session). On `localhost` over plain HTTP this is fine for personal use; on any network-reachable deployment you **MUST** terminate TLS in front (caddy, traefik, nginx, Cloudflare Tunnel, …). The shipped `compose.yml` exposes plain HTTP on `:8000` — that is for `localhost` only.
 
 ## Endpoints
 
 - `GET /health` — public, returns `{"status": "ok"}`.
-- `POST /mcp/` — MCP entry point (requires `Authorization: Bearer ${MCP_API_KEY}`).
+- `POST /mcp/` — MCP entry point (requires `Authorization: Basic …` or `X-Fitatu-Session: …`).
 
 ## MCP tools
 
 All date params are `YYYY-MM-DD`. Read tools accept a `start_date` and optional `end_date` (defaults to `start_date`).
+
+### Auth tool
+
+| Tool | Description |
+|------|-------------|
+| `fitatu_login(email, password)` | Authenticate against Fitatu, returning a `session_id` to use in subsequent `X-Fitatu-Session` headers. Server never persists credentials. Session expires after 30 days idle. |
 
 ### Read tools
 
@@ -58,12 +66,11 @@ Writes hit `https://www.fitatu.com/api` (the canonical web app cluster). Reads s
 
 ```bash
 cp .env.example .env
-# Fill in FITATU_USERNAME / FITATU_PASSWORD,
-# generate MCP_API_KEY with `openssl rand -hex 32`.
+# No Fitatu credentials needed here — each MCP client authenticates per-request.
 docker compose up -d --build
 ```
 
-This brings up the MCP server at `http://localhost:8000/mcp/` (auth: bearer `MCP_API_KEY`). The SQLite cache lives in the `fitatu_data` volume.
+This brings up the MCP server at `http://localhost:8000/mcp/`. The SQLite cache lives in the `fitatu_data` volume. Each MCP client (Claude Desktop, gateway, …) authenticates per-request — see the **Authentication** section below.
 
 To pull the pre-built image instead of building locally, set `FITATU_MCP_IMAGE` in `.env` (e.g. `ghcr.io/pawelharacz/fitatu-mcp:latest`) and run `docker compose pull && docker compose up -d`.
 
@@ -73,13 +80,47 @@ The Fitatu mobile/web client signs requests with a static `api-secret` header. T
 
 Because it's a public client identifier rather than a real secret, a working default ships in `fitatu_client.py` and **you do not need to set `FITATU_API_SECRET`** unless Fitatu rotates the value. If they do, grab the new one from any authenticated XHR in the Fitatu web app DevTools (Network tab → request headers → `api-secret`) and set it in `.env`.
 
-## MCP client setup
+## Authentication
 
-Point any MCP client (Claude Desktop, Docker MCP Gateway, custom integration) at the server:
+The server supports two ingress paths. Both converge on the same per-user `FitatuClient` cached in memory.
+
+### Path A — Static `Authorization: Basic` (recommended for single-user clients)
+
+Configure your MCP client to send Basic auth with your Fitatu email + password:
+
+```jsonc
+// Claude Desktop / similar MCP-client config snippet
+{
+  "transport": "streamable-http",
+  "url": "http://localhost:8000/mcp/",
+  "headers": {
+    "Authorization": "Basic <base64(email:password)>"
+  }
+}
+```
+
+The server logs you into Fitatu on the first request, caches the FitatuClient by your Fitatu user_id, and re-uses it for subsequent requests with the same Basic header.
+
+### Path B — `fitatu_login` tool + `X-Fitatu-Session` header
+
+If your client can't pass arbitrary headers, or you'd rather not put a password in a config file, log in interactively from chat:
+
+```
+LLM:  Calling fitatu_login(email="you@example.com", password="...")
+MCP:  {"ok": true, "session_id": "AbCd...43chars...", "user_id": "41130303", ...}
+```
+
+Then either:
+- paste the `session_id` into your client config as `X-Fitatu-Session: <session_id>`, or
+- let the LLM include the session id with every follow-up tool call (some clients can route headers based on prior tool responses).
+
+Sessions live in process memory only. They expire after 30 days of idle time (configurable via `FITATU_SESSION_TTL_SECONDS`), or when the server restarts.
+
+### MCP client setup
 
 - Transport: **HTTP Streamable**
 - URL: `http://localhost:8000/mcp/` (or `http://fitatu-mcp:8000/mcp/` from inside the compose network)
-- Headers: `Authorization: Bearer <MCP_API_KEY>`
+- Headers: `Authorization: Basic …` **or** `X-Fitatu-Session: …`
 
 Typical flow: call `sync_day` once for the date range you care about, then chain `get_day_macros` / `get_day_summary` for downstream work.
 
@@ -89,10 +130,8 @@ The Python files use relative imports, so the package must be importable as `mcp
 
 ```bash
 pip install -r requirements.txt
-export FITATU_USERNAME=you@example.com
-export FITATU_PASSWORD=…
+# No Fitatu credentials in env — clients pass them per-request.
 # FITATU_API_SECRET is optional — a working default is built in.
-export MCP_API_KEY=$(openssl rand -hex 32)
 export FITATU_DB_FILE=./fitatu_nutrition.db
 python -m uvicorn mcp_server.server:app --host 0.0.0.0 --port 8000
 ```
@@ -117,12 +156,11 @@ The image runs as UID 1000, exposes 8000, declares a `/health` HEALTHCHECK, and 
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `FITATU_USERNAME` | — | Fitatu account email. |
-| `FITATU_PASSWORD` | — | Fitatu account password. |
 | `FITATU_API_SECRET` | `PYRXtfs88UDJMuCCrNpLV` (built-in) | Public client identifier; override only if Fitatu rotates it. See "About `FITATU_API_SECRET`" below. |
-| `MCP_API_KEY` | — | Shared secret required on every MCP request. |
 | `FITATU_DB_FILE` | `/data/fitatu_nutrition.db` | SQLite path inside the container. |
 | `FITATU_TODAY_TTL_SECONDS` | `300` | How long today's row is treated as fresh. |
+| `FITATU_SESSION_TTL_SECONDS` | `2592000` (30 days) | Idle TTL for cached FitatuClients in the session pool. |
+| `FITATU_SESSION_POOL_MAX` | `64` | Max concurrent logged-in Fitatu users cached in memory. |
 | `FITATU_BASE_URL_READ` | `https://pl-pl.fitatu.com` | Override Fitatu cluster for reads. |
 | `FITATU_BASE_URL_WRITE` | `https://www.fitatu.com` | Override Fitatu cluster for writes (no `/api` suffix; client appends it). |
 | `FITATU_ALLOW_DELETE` | `false` | Set to `true` to register `delete_custom_product` and `delete_meal_item`. |

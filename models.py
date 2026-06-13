@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -94,6 +94,9 @@ class MealItem(Base):
 
 class Product(Base):
     __tablename__ = "products"
+    __table_args__ = (
+        Index("ix_products_user_source", "user_id", "source"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     name: Mapped[str] = mapped_column(String(255), index=True)
@@ -109,6 +112,7 @@ class Product(Base):
     sugars: Mapped[float | None] = mapped_column(Float, nullable=True)
     cholesterol: Mapped[float | None] = mapped_column(Float, nullable=True)
     barcode: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     raw: Mapped[str | None] = mapped_column(String, nullable=True)
     source: Mapped[str] = mapped_column(String(16), default="custom")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))

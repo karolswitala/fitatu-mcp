@@ -1,0 +1,8 @@
+# Allowlist: ship only what the image needs at runtime
+*
+!requirements.txt
+!fitatu_mcp/
+
+# Never ship bytecode caches
+**/__pycache__
+**/*.pyc

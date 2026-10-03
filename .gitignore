@@ -4,3 +4,6 @@ __pycache__/
 *.pyd
 *.db
 .env
+.venv/
+.DS_Store
+.pytest_cache/

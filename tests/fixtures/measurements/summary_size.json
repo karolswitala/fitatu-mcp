@@ -1,0 +1,11 @@
+{
+ "neck":          { "startValue": 36.5, "endValue": 37,   "difference": 0.5 },
+ "chest":         { "startValue": 100,  "endValue": 96,   "difference": -4 },
+ "waist":         { "startValue": 90,   "endValue": 82,   "difference": -8 },
+ "stomach":       { "startValue": 97,   "endValue": 88,   "difference": -9 },
+ "hips":          { "startValue": 101,  "endValue": 95,   "difference": -6 },
+ "thigh":         { "startValue": 58,   "endValue": 55,   "difference": -3 },
+ "calf":          { "startValue": 39,   "endValue": 37.5, "difference": -1.5 },
+ "biceps":        { "startValue": 33,   "endValue": 32,   "difference": -1 },
+ "fatPercentage": { "startValue": 25.0, "endValue": 20.4, "difference": -4.6 }
+}

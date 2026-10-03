@@ -13,10 +13,11 @@ FastAPI app  (server.py)
      ├── /health         — liveness probe
      └── /mcp            — MCP endpoint (mounted sub-app)
               │
-              └── MCP tools (4 tools, all defined in server.py)
+              └── MCP tools (9 tools: 4 nutrition + 5 measurements, all in server.py)
                        │
                        ├── FitatuClient  (fitatu_client.py)   — talks to Fitatu API
-                       ├── service.py                         — sync + persist logic
+                       ├── service.py                         — nutrition sync + persist logic
+                       ├── measurements_service.py            — measurements sync + DB derivations
                        └── SQLite via SQLAlchemy              — cache
 ```
 
@@ -26,10 +27,11 @@ FastAPI app  (server.py)
 
 | File | Responsibility |
 |------|---------------|
-| `fitatu_mcp/server.py` | App wiring, auth middleware, all 4 MCP tool definitions, date validation helpers |
-| `fitatu_mcp/service.py` | Business logic: aggregate API response → schema, persist to DB, sync orchestration |
-| `fitatu_mcp/fitatu_client.py` | HTTP client for Fitatu API (login, token refresh, fetch day data) |
-| `fitatu_mcp/models.py` | SQLAlchemy ORM models (3 tables) |
+| `fitatu_mcp/server.py` | App wiring, auth middleware, all 9 MCP tool definitions, date/metric validation helpers |
+| `fitatu_mcp/service.py` | Nutrition business logic: aggregate API response → schema, persist to DB, sync orchestration |
+| `fitatu_mcp/measurements_service.py` | Measurements: metric mapping, sync, staleness, pure DB derivations, BMI |
+| `fitatu_mcp/fitatu_client.py` | HTTP client for Fitatu API (login, token refresh, shared `_authed_get`, day + measurement getters) |
+| `fitatu_mcp/models.py` | SQLAlchemy ORM models (5 tables) |
 | `fitatu_mcp/schemas.py` | Pydantic models used as in-memory data transfer objects |
 | `fitatu_mcp/database.py` | SQLAlchemy engine + session factory, `init_db()` |
 | `tests/helpers.py` | Shared DB insert helpers for tests |
@@ -37,6 +39,9 @@ FastAPI app  (server.py)
 | `tests/test_service.py` | Unit tests for service layer functions |
 | `tests/test_server.py` | Integration tests for server-level helpers (cache counts) |
 | `tests/test_models.py` | DB constraint tests (unique indexes) |
+| `tests/test_measurements_client.py` | Client tests: `_authed_get`, getters, `get_day` regression |
+| `tests/test_measurements_service.py` | Measurements service + DB derivation tests |
+| `tests/test_measurements_server.py` | Measurements tool/validator tests |
 
 ---
 
@@ -127,11 +132,11 @@ n8n calls get_day_macros("2026-06-04")
       → return dict
 ```
 
-### Cache miss or stale — triggers sync
+### Cache miss, stale, or `force_refresh` — triggers sync
 
 ```
-_load_or_sync_day
-  → _load_day returns None (or stale)
+_load_or_sync_day(db, user_id, day_date, force_refresh)
+  → _load_day returns None (or stale, or force_refresh=True)
   → sync_day_from_fitatu(db, client, day_date)
       → client.get_day(day_date)         ← HTTP GET to Fitatu (blocking, in thread)
       → aggregate_day_summary()          ← raw dict → DaySummarySchema
@@ -170,19 +175,96 @@ Configured via env var `FITATU_TODAY_TTL_SECONDS`.
 
 ## MCP Tools
 
-| Tool | Max range | Auto-syncs? | Returns |
-|------|-----------|-------------|---------|
-| `sync_day` | 31 days | Always (explicit sync) | cache before/after delta |
-| `get_day_summary` | 7 days | On miss/stale | full meals + items + day totals |
-| `get_day_macros` | 31 days | On miss/stale | macro totals only |
-| `get_cache_stats` | 31 days | Never (read-only) | cache counts + totals, or `cached: false` |
+There is no agent-facing sync tool: the cache is an implementation detail. Both reads take
+`force_refresh=False`; `True` bypasses `_is_stale` and re-syncs every day in the range.
+Freshness control is the same across nutrition and measurements.
+
+| Tool | Max range | Syncs | Returns |
+|------|-----------|-------|---------|
+| `get_day_summary` | 7 days | On miss/stale, or `force_refresh` | full meals + items + day totals |
+| `get_day_macros` | 31 days | On miss/stale, or `force_refresh` | macro totals only |
 
 All responses are wrapped in `_range_envelope`:
 ```json
 { "start_date": "...", "end_date": "...", "day_count": N, "days": [...] }
 ```
 
-`get_cache_stats` uses `_load_day` directly (no auto-sync). Uncached days return `{"day_date": "...", "cached": false}`. Safe to call as a diagnostic without side effects.
+---
+
+## Body measurements
+
+A read-only layer alongside nutrition, covering weight, body sizes, body-fat percentage and
+derived BMI. It follows the same shape (SQLite cache + staleness + `@mcp.tool` →
+`asyncio.to_thread`) but uses a different cache model and lives in its own
+`measurements_service.py` module (nutrition logic stays in `service.py`).
+
+### Point-cache data model
+
+Two extra tables (auto-created by `init_db()`):
+
+```
+measurement_point        (one row per user+metric+date)
+   id, user_id, metric, measured_date, value, unit
+   created_at, updated_at
+   UNIQUE(user_id, metric, measured_date)   — uq_measurement_point
+   INDEX(user_id, metric)                    — ix_measurement_point_user_metric
+
+user_body_profile        (one row per user)
+   user_id (PK), height_cm, weight_unit, size_unit
+   created_at, updated_at
+```
+
+`metric` is the canonical **tool-facing** name (`weight`, `neck`, `chest`, `waist`,
+`abdomen`, `hips`, `thigh`, `calf`, `biceps`, `body_fat`). `normalize_metric()` maps both the
+tool name and the raw Fitatu API key (e.g. `stomach` → `abdomen`, `fatPercentage` →
+`body_fat`) to the canonical name and rejects unknown input. Units are stored per point
+(`KG` for weight, `%` for body fat, `CM` for sizes).
+
+### Sync strategy
+
+`sync_measurements(db, client, user_id)` captures full history in ~10 requests and upserts
+points idempotently:
+
+- `GET measurements/chart/weight` → one `weight` point per day.
+- `GET measurements/size/{part}` (×9) → one point per recorded date for each size metric.
+- `GET settings-new/{today}` → `UserBodyProfile.height_cm` (+ units when present), needed for BMI.
+
+BMI has no endpoint; it is computed as `weight_kg / (height_cm/100)²`.
+
+### Derivations (pure, DB-only)
+
+Everything the tools return is derived from cached points without extra network calls, which
+keeps the derivation helpers unit-testable offline:
+
+| Helper | Returns |
+|--------|---------|
+| `series_from_db` | one metric's points, newest-first, date/limit-bounded |
+| `summary_from_db` | per-metric `start`(oldest) / `end`(newest) / `difference` / `latest_date` |
+| `day_from_db` | all metrics for one date + units + BMI |
+| `compute_bmi` / `bmi_from_db` | BMI for a date, or for the latest weight when no date given |
+
+### Staleness
+
+A single `MEASUREMENTS_TTL_SECONDS` (default 3600) keyed off the newest `updated_at` among a
+user's points. `measurements_are_stale()` is true when there are no points or the newest point
+is older than the TTL; `ensure_fresh()` triggers a full re-sync when stale (mirrors
+`_load_or_sync_day` for nutrition). A full re-sync refreshes all metrics at once.
+
+### Tools
+
+The cache is an internal detail, so there is **no** agent-facing sync tool: reads refresh on
+staleness via `_refresh_measurements()`, and `force_refresh=True` bypasses the TTL for a full
+re-fetch. `sync_measurements()` remains a service-layer function (used by `force_refresh` and
+tests), not a tool. BMI is folded into the dashboard and single-date outputs rather than being
+a separate tool.
+
+| Tool | Signature | Returns |
+|------|-----------|---------|
+| `get_body_measurements` | `(force_refresh=False)` | `{metrics: [{metric, start_value, end_value, difference, latest_date, unit}], bmi}` |
+| `get_measurement_history` | `(metric, from_date="", to_date="", force_refresh=False)` | `{metric, unit, count, points}` |
+| `get_measurements_on_date` | `(date, force_refresh=False)` | `{date, metrics, bmi, weight_unit, size_unit}` |
+
+All five are strictly read-only — the app's detail-screen `PUT` is deliberately not replicated.
 
 ---
 
@@ -204,6 +286,7 @@ All responses are wrapped in `_range_envelope`:
 | `MCP_API_KEY` | — | Bearer token protecting the MCP endpoint |
 | `FITATU_DB_FILE` | `fitatu_nutrition.db` | SQLite file path |
 | `FITATU_TODAY_TTL_SECONDS` | `300` | How old today's cache can be before re-sync |
+| `MEASUREMENTS_TTL_SECONDS` | `3600` | How old the body-measurements cache can be before a full re-sync |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `MCP_ENABLE_DNS_REBINDING_PROTECTION` | `false` | Transport security setting |
 | `MCP_ALLOWED_HOSTS` | `localhost,...` | Allowed hosts for transport security |

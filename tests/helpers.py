@@ -1,6 +1,12 @@
 from datetime import date
 
-from fitatu_mcp.models import DailyNutrition, MealItem, MealNutrition
+from fitatu_mcp.models import (
+    DailyNutrition,
+    MealItem,
+    MealNutrition,
+    MeasurementPoint,
+    UserBodyProfile,
+)
 
 
 def insert_day(session, user_id="user1", day_date=date(2026, 6, 6)):
@@ -40,3 +46,28 @@ def insert_item(session, meal_id, name="Apple", plan_id=None, product_id=1,
     session.add(item)
     session.flush()
     return item
+
+
+def insert_measurement_point(session, user_id="user1", metric="weight",
+                             measured_date=date(2026, 3, 15), value=70.0, unit="KG",
+                             updated_at=None):
+    point = MeasurementPoint(
+        user_id=user_id, metric=metric, measured_date=measured_date,
+        value=value, unit=unit,
+    )
+    if updated_at is not None:
+        point.updated_at = updated_at
+    session.add(point)
+    session.flush()
+    return point
+
+
+def insert_body_profile(session, user_id="user1", height_cm=175.0,
+                        weight_unit="KG", size_unit="CM"):
+    profile = UserBodyProfile(
+        user_id=user_id, height_cm=height_cm,
+        weight_unit=weight_unit, size_unit=size_unit,
+    )
+    session.add(profile)
+    session.flush()
+    return profile

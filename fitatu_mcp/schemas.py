@@ -45,3 +45,40 @@ class DaySummarySchema(BaseModel):
     day_date: str
     totals: MacroTotals = Field(default_factory=MacroTotals)
     meals: list[MealSummarySchema] = Field(default_factory=list)
+
+
+class MeasurementPointSchema(BaseModel):
+    date: str
+    value: float
+    unit: str | None = None
+
+
+class MetricSeriesSchema(BaseModel):
+    metric: str
+    unit: str | None = None
+    count: int = 0
+    points: list[MeasurementPointSchema] = Field(default_factory=list)
+
+
+class MetricSummarySchema(BaseModel):
+    metric: str
+    start_value: float | None = None
+    end_value: float | None = None
+    difference: float | None = None
+    latest_date: str | None = None
+    unit: str | None = None
+
+
+class DayMeasurementsSchema(BaseModel):
+    date: str
+    metrics: dict[str, float] = Field(default_factory=dict)
+    bmi: float | None = None
+    weight_unit: str | None = None
+    size_unit: str | None = None
+
+
+class BmiSchema(BaseModel):
+    date: str
+    weight_kg: float
+    height_cm: float
+    bmi: float

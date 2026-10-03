@@ -99,3 +99,33 @@ class MealItem(Base):
     eaten: Mapped[bool] = mapped_column(Boolean, default=False)
 
     meal: Mapped[MealNutrition] = relationship(back_populates="items")
+
+
+class MeasurementPoint(Base):
+    __tablename__ = "measurement_point"
+    __table_args__ = (
+        UniqueConstraint("user_id", "metric", "measured_date", name="uq_measurement_point"),
+        Index("ix_measurement_point_user_metric", "user_id", "metric"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    metric: Mapped[str] = mapped_column(String(32), index=True)
+    measured_date: Mapped[date] = mapped_column(Date, index=True)
+    value: Mapped[float] = mapped_column(Float)
+    unit: Mapped[str | None] = mapped_column(String(8), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class UserBodyProfile(Base):
+    __tablename__ = "user_body_profile"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    height_cm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    weight_unit: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    size_unit: Mapped[str | None] = mapped_column(String(8), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

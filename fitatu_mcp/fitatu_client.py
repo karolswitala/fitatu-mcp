@@ -10,6 +10,14 @@ LOGIN_URL = "https://pl-pl.fitatu.com/api/login"
 REFRESH_URL = "https://pl-pl.fitatu.com/api/token/refresh"
 DAY_URL_TEMPLATE = "https://pl-pl.fitatu.com/api/diet-and-activity-plan/{user_id}/day/{date}"
 
+_MEASUREMENTS_BASE = "https://pl-pl.fitatu.com/api/users/{user_id}"
+MEASUREMENTS_SUMMARY_SIZE_URL = _MEASUREMENTS_BASE + "/measurements/summary/size"
+MEASUREMENT_SERIES_URL = _MEASUREMENTS_BASE + "/measurements/size/{part}"
+WEIGHT_SUMMARY_URL = _MEASUREMENTS_BASE + "/measurements/summary/weight"
+WEIGHT_CHART_URL = _MEASUREMENTS_BASE + "/measurements/chart/weight"
+DAY_MEASUREMENTS_URL = _MEASUREMENTS_BASE + "/measurements/{date}"
+SETTINGS_NEW_URL = _MEASUREMENTS_BASE + "/settings-new/{date}"
+
 FITATU_API_SECRET = os.getenv("FITATU_API_SECRET")
 if not FITATU_API_SECRET:
     raise RuntimeError("FITATU_API_SECRET must be set")
@@ -139,31 +147,92 @@ class FitatuClient:
         logger.warning("Fitatu token refresh failed for all payload variants")
         return False
 
-    def get_day(self, day_date: str) -> dict[str, Any]:
+    def _authed_get(self, url: str, params: dict[str, Any] | None = None) -> Any:
         if not self.token or not self.user_id:
-            logger.info("No active Fitatu session; performing login before get_day")
+            logger.info("No active Fitatu session; performing login before request url=%s", url)
             self.login()
 
         headers = BASE_HEADERS.copy()
         headers["Authorization"] = f"Bearer {self.token}"
         headers["API-Cluster"] = f"pl-pl{self.user_id}"
-        url = DAY_URL_TEMPLATE.format(user_id=self.user_id, date=day_date)
-        logger.info("Fetching Fitatu day data day_date=%s user_id=%s", day_date, self.user_id)
+        logger.info("Fitatu authed GET url=%s params=%s user_id=%s", url, params, self.user_id)
 
-        response = requests.get(url, headers=headers, timeout=20)
-        logger.info("Fitatu get_day response status=%s", response.status_code)
+        response = requests.get(url, headers=headers, params=params, timeout=20)
+        logger.info("Fitatu GET response status=%s url=%s", response.status_code, url)
         if response.status_code == 401:
-            logger.warning("Fitatu get_day returned 401; attempting refresh/login recovery")
+            logger.warning("Fitatu GET returned 401; attempting refresh/login recovery url=%s", url)
             if not self.refresh():
                 self.login()
-                headers["Authorization"] = f"Bearer {self.token}"
-            else:
-                headers["Authorization"] = f"Bearer {self.token}"
-            response = requests.get(url, headers=headers, timeout=20)
-            logger.info("Fitatu get_day retry response status=%s", response.status_code)
+            headers["Authorization"] = f"Bearer {self.token}"
+            headers["API-Cluster"] = f"pl-pl{self.user_id}"
+            response = requests.get(url, headers=headers, params=params, timeout=20)
+            logger.info("Fitatu GET retry response status=%s url=%s", response.status_code, url)
 
         if response.status_code != 200:
-            raise RuntimeError(f"get_day failed with status {response.status_code}: {response.text}")
+            raise RuntimeError(f"GET {url} failed with status {response.status_code}: {response.text}")
 
-        logger.info("Fitatu day fetch succeeded day_date=%s", day_date)
         return response.json()
+
+    def get_day(self, day_date: str) -> dict[str, Any]:
+        if not self.token or not self.user_id:
+            logger.info("No active Fitatu session; performing login before get_day")
+            self.login()
+
+        url = DAY_URL_TEMPLATE.format(user_id=self.user_id, date=day_date)
+        logger.info("Fetching Fitatu day data day_date=%s user_id=%s", day_date, self.user_id)
+        result = self._authed_get(url)
+        logger.info("Fitatu day fetch succeeded day_date=%s", day_date)
+        return result
+
+    def get_size_summary(self) -> dict[str, Any]:
+        if not self.user_id:
+            self.login()
+        url = MEASUREMENTS_SUMMARY_SIZE_URL.format(user_id=self.user_id)
+        logger.info("Fetching Fitatu size summary user_id=%s", self.user_id)
+        return self._authed_get(url)
+
+    def get_metric_series(self, api_key: str, limit: int = 500) -> list[dict[str, Any]]:
+        if not self.user_id:
+            self.login()
+        url = MEASUREMENT_SERIES_URL.format(user_id=self.user_id, part=api_key)
+        logger.info("Fetching Fitatu metric series part=%s limit=%s user_id=%s", api_key, limit, self.user_id)
+        return self._authed_get(url, params={"limit": limit, "page": 1})
+
+    def get_weight_summary(self, limit: int = 500, from_date: str | None = None) -> list[dict[str, Any]]:
+        if not self.user_id:
+            self.login()
+        url = WEIGHT_SUMMARY_URL.format(user_id=self.user_id)
+        params: dict[str, Any] = {"limit": limit, "page": 1}
+        if from_date:
+            params["fromDate"] = from_date
+        logger.info("Fetching Fitatu weight summary limit=%s from_date=%s user_id=%s", limit, from_date, self.user_id)
+        return self._authed_get(url, params=params)
+
+    def get_weight_chart(self) -> dict[str, Any]:
+        if not self.user_id:
+            self.login()
+        url = WEIGHT_CHART_URL.format(user_id=self.user_id)
+        logger.info("Fetching Fitatu weight chart user_id=%s", self.user_id)
+        return self._authed_get(url)
+
+    def get_day_measurements(self, day_date: str) -> dict[str, Any]:
+        if not self.user_id:
+            self.login()
+        url = DAY_MEASUREMENTS_URL.format(user_id=self.user_id, date=day_date)
+        logger.info("Fetching Fitatu day measurements day_date=%s user_id=%s", day_date, self.user_id)
+        return self._authed_get(url)
+
+    def get_height(self, day_date: str) -> dict[str, Any]:
+        if not self.user_id:
+            self.login()
+        url = SETTINGS_NEW_URL.format(user_id=self.user_id, date=day_date)
+        logger.info("Fetching Fitatu settings for height day_date=%s user_id=%s", day_date, self.user_id)
+        data = self._authed_get(url)
+        settings = data.get("userSettings") or {} if isinstance(data, dict) else {}
+        return {
+            "height_cm": settings.get("heightCm"),
+            "height": settings.get("height"),
+            "height_unit": settings.get("heightUnit"),
+            "weight_unit": settings.get("weightUnit"),
+            "size_unit": settings.get("sizeUnit"),
+        }

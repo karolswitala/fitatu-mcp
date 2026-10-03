@@ -11,15 +11,34 @@ Sync is additive: only new meal items are inserted; existing cached items are pr
 
 ## MCP tools (HTTP Streamable)
 
-All tools accept `start_date` (required, YYYY-MM-DD) and `end_date` (optional, defaults to `start_date`).
-Tools other than `sync_day` auto-sync from Fitatu if the requested day is not cached or is stale.
+All tools accept `start_date` (required, YYYY-MM-DD), `end_date` (optional, defaults to `start_date`)
+and `force_refresh` (optional, default `false`). Days are read from the SQLite cache and re-fetched
+from Fitatu automatically when missing or stale; `force_refresh=true` bypasses the cache and re-fetches now.
+There is no separate sync tool — the cache is an implementation detail.
 
-| Tool | Max range | Auto-syncs | Description |
-|------|-----------|------------|-------------|
-| `sync_day` | 31 days | Always | Explicitly sync days from Fitatu into SQLite |
-| `get_day_summary` | 7 days | Yes | Full nutrition summary including all meals and items |
-| `get_day_macros` | 31 days | Yes | Macro totals only (energy, protein, fat, carbs, fiber, sugars, salt) |
-| `get_cache_stats` | 31 days | No | Inspect the local cache — returns `cached: false` for uncached days |
+| Tool | Max range | Description |
+|------|-----------|-------------|
+| `get_day_summary` | 7 days | Full nutrition summary including all meals and items |
+| `get_day_macros` | 31 days | Macro totals only (energy, protein, fat, carbs, fiber, sugars, salt) |
+
+## MCP tools — body measurements (read-only)
+
+Weight, body sizes, body-fat percentage and derived BMI are cached as per-metric points
+(one row per `user_id`/`metric`/`date`). The cache is an implementation detail: tools
+refresh from Fitatu automatically when it is empty or older than `MEASUREMENTS_TTL_SECONDS`
+(default 3600), and every tool takes `force_refresh=False` to bypass the TTL and re-fetch now.
+BMI is folded into the dashboard and single-date outputs. Metric names accept both the
+friendly tool name and the raw Fitatu API key, e.g. `abdomen` or `stomach`, `body_fat` or
+`fatPercentage`. Allowed metrics: `weight`, `neck`, `chest`, `waist`, `abdomen`, `hips`,
+`thigh`, `calf`, `biceps`, `body_fat`.
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `get_body_measurements` | `get_body_measurements(force_refresh=False)` | Dashboard: per-metric first/latest value, total change, latest date, plus current BMI |
+| `get_measurement_history` | `get_measurement_history(metric, from_date="", to_date="", force_refresh=False)` | One metric's time series (newest-first), optionally date-bounded; omit dates for full history |
+| `get_measurements_on_date` | `get_measurements_on_date(date, force_refresh=False)` | All metrics recorded on one date, with derived BMI and units |
+
+These tools are strictly read-only; they never issue a `PUT`/`POST`/`DELETE` to Fitatu.
 
 ## Local run
 
@@ -68,8 +87,6 @@ docker run --rm -p 8000:8000 \
   -v "${PWD}/data:/data" \
   fitatu-mcp-server
 ```
-
-Use MCP tool `sync_day` first, then read data with the remaining tools.
 
 ## n8n MCP integration
 
